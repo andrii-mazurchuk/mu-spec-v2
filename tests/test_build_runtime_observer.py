@@ -295,6 +295,8 @@ def test_observer_handover(tmp_path, monkeypatch):
     from mu_spec.registry import build_runtime
     from mu_spec.writer import WriteCall
 
+    from mu_spec.outside import PROJECTS_SUBDIR
+
     D = tmp_path / "state"
     cwd = tmp_path / "cwd"
     cwd.mkdir()
@@ -308,11 +310,13 @@ def test_observer_handover(tmp_path, monkeypatch):
         events.append(("ship", len(events)))
         return object()
 
+    # A0 and B0 are the bytes the running unit wrote, read before the start-up pass runs
+    A0 = record_path(D / PROJECTS_SUBDIR, "a").read_bytes()
+    B0 = record_path(D / PROJECTS_SUBDIR, "b").read_bytes()
+
     # 1. both start-up installs, in either order, then the Ship builder; nothing else
     rt = build_runtime(ship_builder=recorder, observer=obs, github=FakeGitHub())
     root = rt.config.root
-    A0 = record_path(root, "a").read_bytes()
-    B0 = record_path(root, "b").read_bytes()
     assert len(events) == 3, events
     assert {events[0], events[1]} == {("installed", "a", A0, False), ("installed", "b", B0, False)}
     assert events[2] == ("ship", 2)
