@@ -117,6 +117,7 @@ test("rhythm, back-off, hide and switch", async () => {
   // 8. on return before the wait has passed, the ask waits for it
   r = p.deliver({ type: "hidden", now: 96000 });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
   r = p.deliver({ type: "visible", now: 99000 });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
@@ -136,9 +137,11 @@ test("rhythm, back-off, hide and switch", async () => {
   r = p.deliver({ type: "switch", now: 101000, projectChanged: false });
   expect(show(r.sends)).toEqual(["head#10 head null"]);
   expect(r.sends[0].epoch).toBe(2);
+  expect(r.aborts).toEqual([]);
   r = p.deliver({ type: "switch", now: 102000, projectChanged: false });
   expect(show(r.sends)).toEqual(["head#11 head null"]);
   expect(r.sends[0].epoch).toBe(3);
+  expect(r.aborts).toEqual([]);
   r = p.deliver({ type: "outcome", now: 102100, seq: 10, cls: "parts", applied: true, complete: false, run: null });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
@@ -162,10 +165,13 @@ test("ship progress track", async () => {
   expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "outcome", now: 0, seq: 1, cls: "unchanged", ...ok });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "time", now: 10000 });
   expect(show(r.sends)).toEqual(["ask#2 whole null"]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "outcome", now: 10050, seq: 2, cls: "unchanged", ...ok });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
 
   // 2. the press itself sends nothing; progress is due one second later
   r = a.deliver({ type: "ship_sent", now: 15000 });
@@ -185,6 +191,7 @@ test("ship progress track", async () => {
   // 4. the next progress ask follows the answer by one second, and a running answer names the run
   r = a.deliver({ type: "time", now: 17050 });
   expect(show(r.sends)).toEqual(["progress#4 whole null"]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "progress", now: 17150, seq: 4, cls: "running", run: "n:1" });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
@@ -192,16 +199,19 @@ test("ship progress track", async () => {
   // 5. the progress ask carries the tracked run; the press settling stops nothing
   r = a.deliver({ type: "time", now: 18150 });
   expect(show(r.sends)).toEqual(["progress#5 whole n:1"]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "ship_settled", now: 18200 });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "progress", now: 18250, seq: 5, cls: "running", run: "n:1" });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
   expect(r.wakeAt).toBe(19250);
 
   // 6. 'ended' with no press awaited ends the track with one end-of-run refresh
   r = a.deliver({ type: "time", now: 19250 });
   expect(show(r.sends)).toEqual(["progress#6 whole n:1"]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "progress", now: 19350, seq: 6, cls: "ended", run: null });
   expect(show(r.sends)).toEqual(["end_refresh#7 whole null"]);
   expect(r.aborts).toEqual([]);
@@ -211,6 +221,7 @@ test("ship progress track", async () => {
   // 7. the background ask is where it would be with no run; a late run part naming the ended run is ignored
   r = a.deliver({ type: "time", now: 20000 });
   expect(show(r.sends)).toEqual(["ask#8 whole null"]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "outcome", now: 20050, seq: 8, cls: "unchanged", applied: true, complete: true, run: "n:1" });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
@@ -219,8 +230,10 @@ test("ship progress track", async () => {
   // 8. the end-of-run refresh's answer changes nothing, and the rhythm holds
   r = a.deliver({ type: "outcome", now: 20100, seq: 7, cls: "parts", ...ok });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
   r = a.deliver({ type: "time", now: 30000 });
   expect(show(r.sends)).toEqual(["ask#9 whole null"]);
+  expect(r.aborts).toEqual([]);
   expect(a.progressAt.length).toBe(progressSentBy6);
   expect(a.askAt).toEqual([0, 10000, 20000, 30000]);
 
@@ -230,6 +243,7 @@ test("ship progress track", async () => {
   // 9. an outcome naming a run while the track is off asks for its progress at that instant
   r = b.deliver({ type: "visible", now: 0 });
   expect(show(r.sends)).toEqual(["ask#1 whole null"]);
+  expect(r.aborts).toEqual([]);
   r = b.deliver({ type: "outcome", now: 100, seq: 1, cls: "unchanged", applied: true, complete: true, run: "n:2" });
   expect(show(r.sends)).toEqual(["progress#2 whole n:2"]);
   expect(r.aborts).toEqual([]);
@@ -247,6 +261,7 @@ test("ship progress track", async () => {
   // 11. a hidden page sends no progress ask and wakes for nothing
   r = b.deliver({ type: "hidden", now: 6200 });
   expect(show(r.sends)).toEqual([]);
+  expect(r.aborts).toEqual([]);
   r = b.deliver({ type: "progress", now: 6300, seq: 3, cls: "running", run: "n:2" });
   expect(show(r.sends)).toEqual([]);
   expect(r.aborts).toEqual([]);
