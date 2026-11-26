@@ -4,6 +4,66 @@ Modules under test are imported inside each test, so a module not yet written fa
 tests that need it.
 """
 
+import os
+
+import pytest
+
+HEALTHY_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_variant_set(tmp_path):
+    from startcheck.variants import (
+        ALL_VARIANTS,
+        OVERRIDE_VARIANTS,
+        QUICK,
+        VARIANTS,
+        environment,
+    )
+
+    assert len(VARIANTS) == 4096
+    assert VARIANTS[0] == "hhhhhh"
+    assert VARIANTS[1] == "hhhhhm"
+    assert VARIANTS[3] == "hhhhhx"
+    assert VARIANTS[4] == "hhhhmh"
+    assert VARIANTS[-1] == "xxxxxx"
+
+    override_ids = "hhhhhhh hhhhhhe hhhhhhx mhhhhhh mhhhhhe mhhhhhx ehhhhhh ehhhhhe ehhhhhx"
+    assert OVERRIDE_VARIANTS == tuple((override_ids + " xhhhhhh xhhhhhe xhhhhhx").split())
+    assert len(set(ALL_VARIANTS)) == 4108
+
+    single_faults = {"h" * i + code + "h" * (5 - i) for i in range(6) for code in "mex"}
+    assert set(QUICK) == {"hhhhhh", "mmmmmm", "eeeeee", "xxxxxx"} | single_faults
+    assert len(QUICK) == 22
+    assert set(QUICK) <= set(VARIANTS)
+
+    r = str(tmp_path)
+    own = {"PATH": "p", "HOME": "h", "FOO": "f", "PYTHONPATH": "z"}
+    assert environment("hexmhm", r, own) == {
+        "PATH": "p",
+        "HOME": "h",
+        "HOLONIC_STATE_DIR": os.path.join(r, "store"),
+        "MU_SPEC_HOST": "",
+        "MU_SPEC_PORT": "abc",
+        "HOLONIC_GIT_SHA": HEALTHY_SHA,
+    }
+    assert environment("xhhhhhe", r, {}) == {
+        "HOLONIC_STATE_DIR": os.path.join(r, "notes.txt"),
+        "MU_SPEC_HOST": "127.0.0.1",
+        "MU_SPEC_PORT": "19406",
+        "MU_SPEC_PROMPTS_DIR": os.path.join(r, "prompts"),
+        "HOLONIC_GIT_SHA": HEALTHY_SHA,
+        "MU_SPEC_GITHUB_TOKEN": "ghp_startcheck_healthy",
+        "MU_SPEC_ROOT": "",
+    }
+    given_root = os.path.join(r, "store", "projects")
+    assert environment("hhhhhhh", r, {})["MU_SPEC_ROOT"] == given_root
+    assert "MU_SPEC_ROOT" not in environment("hhhhhh", r, {})
+
+    for bad in ("hhhhh", "hhhhhhm", "hhhhhq"):
+        with pytest.raises(ValueError):
+            environment(bad, r, {})
+
+
 BIND_SAMPLES = [
     (
         b"mu-spec cannot bind not a host!:19406: [Errno 11001] getaddrinfo failed\r\n",
