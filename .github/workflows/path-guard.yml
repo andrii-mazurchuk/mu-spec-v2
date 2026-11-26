@@ -1,0 +1,43 @@
+# Install into the TARGET repo as .github/workflows/path-guard.yml, with
+# muspec_sidecar.py and path_guard.py alongside it in .github/guard/.
+#
+# Those three files are in no unit's write_set, so the guard protects itself:
+# an agent that tried to weaken it would fail the guard on that very PR.
+name: path-guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: read          # the unit's scope is read from its issue, nothing more
+
+jobs:
+  write-set:
+    # Only branches named after a unit key. A human PR is not a unit and has no
+    # write_set to check it against, so the guard has nothing to say about it.
+    if: startsWith(github.head_ref, 'S-') || startsWith(github.head_ref, 'A-') || startsWith(github.head_ref, 'I-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # merge-base needs real history, not a shallow clone
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: write_set guard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/guard/path_guard.py \
+            --repo "${{ github.repository }}" \
+            --branch "${{ github.head_ref }}" \
+            --base "origin/${{ github.base_ref }}"
+
+      - name: guard self-check
+        # If the guard's own logic is broken it must fail loudly rather than
+        # pass everything. A guard that cannot check itself is decoration.
+        run: python3 .github/guard/muspec_sidecar.py --demo
