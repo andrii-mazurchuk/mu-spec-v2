@@ -64,11 +64,11 @@ def test_clock_and_readers(tmp_path, monkeypatch):
     assert r.read(pages) == first
     assert a.read(pages) == committed
 
-    # 5. prompts: names joined under the directory as given, no escape, bytes that are not UTF-8 raise
+    # 5. prompts: a prompt named without its '.md', no escape, bytes that are not UTF-8 raise
     pr = Prompts(P)
-    assert pr.read("default.md") == "hello\n"
-    assert pr.read("../default.md") is None
-    assert pr.read(str(tmp_path / "default.md")) is None
-    assert pr.read("absent.md") is None
+    assert pr.read("default") == "hello\n"
+    assert pr.read("../default") is None
+    assert pr.read(str(tmp_path / "default")) is None
+    assert pr.read("absent") is None
     with pytest.raises(UnicodeDecodeError):
-        pr.read("bad.md")
+        pr.read("bad")
