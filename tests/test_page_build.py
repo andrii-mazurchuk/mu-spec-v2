@@ -4,6 +4,7 @@ Modules under test are imported inside each test, so a module not yet written fa
 tests that need it.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -203,3 +204,144 @@ def test_build_script(tmp_path):
         'export const OUT_PAGE = "out/dashboard.html";',
     ):
         assert line in text, line
+
+
+def test_committed_page_equals_fresh_build():
+    from pagebuild.check import check_build
+
+    verdict = check_build(REPO_ROOT)
+    assert verdict.kind == "pass", verdict.message
+    assert verdict.message == "committed page equals a fresh build"
+
+
+FIXTURE_MANIFEST = b"build.ts\nbun-version\nmanifest.txt\n"
+BUILD_TS_HEAD = 'import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";\n'
+
+
+def builder_version() -> str:
+    """The trimmed output of `bun --version`; the builder must be installed."""
+    import shutil
+    import subprocess
+
+    bun = shutil.which("bun")
+    assert bun is not None, "page builder not installed: bun"
+    return subprocess.run([bun, "--version"], check=True, capture_output=True).stdout.decode("utf-8").strip()
+
+
+def append_log(log: Path) -> str:
+    """The build.ts statement appending `<cwd> <Date.now()>` to log."""
+    return f'appendFileSync({json.dumps(log.as_posix())}, process.cwd() + " " + Date.now() + "\\n");\n'
+
+
+def write_page(name: str, text: str) -> str:
+    """The build.ts statements writing text to out/<name>."""
+    return f'mkdirSync("out", {{ recursive: true }});\nwriteFileSync("out/{name}", {json.dumps(text)});\n'
+
+
+def fixture_repo(
+    r: Path, build_ts: str, version: str, committed: bytes | None = None, manifest: bytes | None = FIXTURE_MANIFEST,
+) -> Path:
+    """A repository r with dashboard/ holding manifest, bun-version and build.ts, and the committed page."""
+    (r / "dashboard").mkdir(parents=True)
+    if manifest is not None:
+        (r / "dashboard" / "manifest.txt").write_bytes(manifest)
+    (r / "dashboard" / "bun-version").write_bytes(version.encode("utf-8") + b"\n")
+    (r / "dashboard" / "build.ts").write_bytes((BUILD_TS_HEAD + build_ts).encode("utf-8"))
+    (r / "mu_spec").mkdir()
+    if committed is not None:
+        (r / "mu_spec" / "dashboard.html").write_bytes(committed)
+    return r
+
+
+def log_lines(log: Path) -> list[str]:
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+def test_check_build_verdicts(tmp_path, monkeypatch):
+    from pagebuild.check import check_build
+
+    v = builder_version()
+
+    def judge(case: str, build_ts, **repo) -> tuple[tuple[str, str], Path]:
+        log = tmp_path / f"{case}.log"
+        r = fixture_repo(tmp_path / case, build_ts(log), repo.pop("version", v), **repo)
+        verdict = check_build(r)
+        return (verdict.kind, verdict.message), log
+
+    def one_page(log: Path) -> str:
+        return write_page("dashboard.html", "x") + append_log(log)
+
+    got, log = judge("pass", one_page, committed=b"x")
+    assert got == ("pass", "committed page equals a fresh build")
+    lines = log_lines(log)
+    assert len(lines) == 2, lines
+    cwds = [line.rpartition(" ")[0] for line in lines]
+    assert cwds[0] != cwds[1], cwds
+    for cwd in cwds:
+        assert not Path(cwd).exists(), cwd
+
+    differs = ("page_differs", "committed page mu_spec/dashboard.html differs from a fresh build")
+    got, _ = judge("differs", one_page, committed=b"y")
+    assert got == differs
+    got, _ = judge("uncommitted", one_page)
+    assert got == differs
+
+    got, _ = judge(
+        "two_files",
+        lambda log: write_page("dashboard.html", "x") + write_page("extra.txt", "e") + append_log(log),
+        committed=b"x",
+    )
+    assert got == ("not_one_page", "build produced 2 files under out/, expected exactly one page")
+
+    got, _ = judge(
+        "failed", lambda log: append_log(log) + 'console.error("boom");\nprocess.exit(3);\n', committed=b"x",
+    )
+    assert got == ("build_failed", "build failed: boom")
+
+    got, log = judge("version", one_page, committed=b"x", version="0.0.0-pinned")
+    assert got == ("builder_version_mismatch", f"page builder version {v} differs from pinned 0.0.0-pinned")
+    assert log_lines(log) == []
+
+    got, _ = judge("no_manifest", one_page, committed=b"x", manifest=None)
+    assert got == ("manifest_fault", "manifest fault: manifest_absent -")
+    got, _ = judge("gone", one_page, committed=b"x", manifest=FIXTURE_MANIFEST + b"src/gone.ts\n")
+    assert got == ("manifest_fault", "manifest fault: listed_file_missing src/gone.ts")
+
+    empty = tmp_path / "empty_path"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    got, _ = judge("no_builder", one_page, committed=b"x")
+    assert got == ("builder_missing", "page builder not installed: bun")
+
+
+def test_check_build_gap_from_end(tmp_path):
+    from pagebuild.check import check_build
+
+    log = tmp_path / "gap.log"
+    path = json.dumps(log.as_posix())
+    build_ts = (
+        f"const text = existsSync({path}) ? readFileSync({path}, \"utf-8\") : \"\";\n"
+        "const lines = text.split(\"\\n\").filter((line) => line !== \"\");\n"
+        "let page;\n"
+        "if (lines.length === 0) {\n"
+        "  await new Promise((resolve) => setTimeout(resolve, 3000));\n"
+        "  page = \"x\";\n"
+        "} else {\n"
+        "  const last = lines[lines.length - 1];\n"
+        "  const e = parseInt(last.slice(last.lastIndexOf(\" \") + 1), 10);\n"
+        "  const d = Date.now() - e;\n"
+        "  page = d < 1500 ? \"x\" : \"y\";\n"
+        "}\n"
+        "mkdirSync(\"out\", { recursive: true });\n"
+        "writeFileSync(\"out/dashboard.html\", page);\n"
+        + append_log(log)
+        + "process.exit(0);\n"
+    )
+    r = fixture_repo(tmp_path / "gap", build_ts, builder_version(), committed=b"y")
+
+    verdict = check_build(r)
+    assert (verdict.kind, verdict.message) == ("not_reproducible", "build not reproducible: two fresh builds differ")
+    lines = log_lines(log)
+    assert len(lines) == 2, lines
+    first, second = (int(line.rpartition(" ")[2]) for line in lines)
+    assert second - first >= 2000, lines
