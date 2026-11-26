@@ -4,7 +4,10 @@ Modules under test are imported inside each test, so a module not yet written fa
 tests that need it.
 """
 
+import json
 import os
+import socket
+import time
 
 import pytest
 
@@ -100,6 +103,172 @@ def test_predicted_counts():
     for bad in ("hhhhh", "hhhhhhm"):
         with pytest.raises(ValueError):
             predicted_outcome(bad)
+
+
+def _files(folder):
+    """Every regular file under folder, as relative posix path -> bytes."""
+    return {
+        p.relative_to(folder).as_posix(): p.read_bytes() for p in folder.rglob("*") if p.is_file()
+    }
+
+
+def _refused(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=5).close()
+    except ConnectionRefusedError:
+        return True
+    return False
+
+
+_FAKE_PREAMBLE = """\
+import json, os, sys, time
+with open({dump!r}, 'w') as f:
+    f.write(json.dumps({{'env': dict(os.environ), 'isolated': sys.flags.isolated,
+                        'path0': sys.path[0], 'cwd': os.getcwd()}}))
+"""
+
+_FAKE_BODIES = {
+    "serve": """\
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == '/health' else 404)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+HTTPServer(('127.0.0.1', int(os.environ['MU_SPEC_PORT'])), Handler).serve_forever()
+""",
+    "fail": "sys.stderr.buffer.write(b'err\\n'); sys.exit(3)\n",
+    "zero": "sys.stdout.buffer.write(b'bye\\n'); sys.exit(0)\n",
+    "sleep": "time.sleep(60)\n",
+}
+
+
+def test_runner_outcomes(tmp_path):
+    from startcheck.runner import (
+        START_ALLOWANCE_S,
+        RunnerError,
+        UnitCommand,
+        alive,
+        restore,
+        start,
+        stop,
+    )
+
+    dump = tmp_path / "dump.json"
+    fakes = {}
+    for name, body in _FAKE_BODIES.items():
+        pkg = tmp_path / "fakes" / name / "mu_spec"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(_FAKE_PREAMBLE.format(dump=str(dump)) + body)
+        fakes[name] = str(pkg.parent)
+
+    ps = tmp_path / "ps"
+    (ps / "projects" / "a").mkdir(parents=True)
+    (ps / "projects" / "a" / "x.json").write_bytes(b"{}")
+    pp = tmp_path / "pp"
+    pp.mkdir()
+    (pp / "default.md").write_bytes(b"d")
+    root = str(tmp_path / "check")
+    os.mkdir(root)
+
+    from startcheck.variants import environment
+
+    def launch(name, variant):
+        restore(root, str(ps), str(pp))
+        return start(UnitCommand("rebuilt", fakes[name]), variant, root, os.environ)
+
+    s = launch("serve", "hhhhhh")
+    try:
+        assert s.outcome == "listening"
+        assert s.port == 19406
+        assert s.exit_code is None
+        assert alive(s)
+        seen = json.loads(dump.read_text())
+        assert seen["env"] == environment("hhhhhh", root, os.environ)
+        assert seen["isolated"] == 1
+        assert seen["path0"] == fakes["serve"]
+        assert seen["cwd"] == os.path.join(root, "work")
+    finally:
+        stop(s)
+    assert _refused(19406)
+    assert not alive(s)
+
+    s = launch("fail", "hhhhhh")
+    assert s.outcome == "exited"
+    assert s.exit_code == 3
+    assert s.stderr == b"err\n"
+
+    s = launch("zero", "hhhhhh")
+    assert s.outcome == "hung"
+    assert s.exit_code == 0
+    assert s.stdout == b"bye\n"
+
+    assert START_ALLOWANCE_S == 15.0
+    began = time.monotonic()
+    s = launch("sleep", "hhehhh")
+    took = time.monotonic() - began
+    assert s.outcome == "hung"
+    assert s.exit_code is None
+    assert s.port is None
+    assert START_ALLOWANCE_S <= took <= START_ALLOWANCE_S + 5, took
+    assert not alive(s)
+
+    for taken in (9006, 19406):
+        dump.unlink(missing_ok=True)
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", taken))
+            listener.listen()
+            restore(root, str(ps), str(pp))
+            with pytest.raises(RunnerError, match=str(taken)):
+                start(UnitCommand("rebuilt", fakes["serve"]), "hhhhhh", root, os.environ)
+        assert not dump.exists(), taken
+
+
+def test_restore_and_reach_port(tmp_path):
+    from startcheck.runner import reach_port, restore
+
+    root = tmp_path / "c"
+    ps = tmp_path / "ps"
+    (ps / "projects" / "a").mkdir(parents=True)
+    (ps / "projects" / "a" / "x.json").write_bytes(b"{}")
+    pp = tmp_path / "pp"
+    pp.mkdir()
+    (pp / "default.md").write_bytes(b"d")
+    ps_before, pp_before = _files(ps), _files(pp)
+
+    (root / "work" / "state" / "projects").mkdir(parents=True)
+    (root / "work" / "state" / "projects" / "junk").write_bytes(b"junk")
+    (root / "work" / "default.md").write_bytes(b"junk")
+    (root / "store" / "projects" / "b").mkdir(parents=True)
+    (root / "store" / "projects" / "b" / "y.json").write_bytes(b"junk")
+    (root / "prompts").mkdir()
+    (root / "prompts" / "extra.md").write_bytes(b"junk")
+    (root / "notes.txt").write_bytes(b"other")
+    (root / "nope").mkdir()
+
+    restore(str(root), str(ps), str(pp))
+
+    assert (root / "work").is_dir()
+    assert list((root / "work").iterdir()) == []
+    assert _files(root / "store") == {"projects/a/x.json": b"{}"}
+    assert set(_files(root / "prompts")) == {"default.md"}
+    assert (root / "notes.txt").read_bytes() == b"not a directory\n"
+    assert not (root / "nope").exists()
+    assert _files(ps) == ps_before
+    assert _files(pp) == pp_before
+
+    assert reach_port("hhhhhh") == 19406
+    assert reach_port("hhmhhh") == 9006
+    assert reach_port("hhehhh") is None
+    assert reach_port("hhxhhh") is None
+    assert reach_port("hhhhhhx") == 19406
+    assert reach_port("xhhhhhe") == 19406
 
 
 BIND_SAMPLES = [
