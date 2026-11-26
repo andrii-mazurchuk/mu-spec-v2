@@ -140,3 +140,66 @@ def test_stage_copies_only_listed(tmp_path):
     assert caught.value.entry == "src"
 
     assert regular_files(src) == source
+
+
+def run_build(scratch: Path, build_ts: bytes, template: str, main_ts: str):
+    """Lay out build.ts, index.html and src/main.ts in scratch and run the builder there."""
+    import shutil
+    import subprocess
+
+    bun = shutil.which("bun")
+    assert bun is not None, "page builder not installed: bun"
+    (scratch / "src").mkdir(parents=True)
+    (scratch / "build.ts").write_bytes(build_ts)
+    (scratch / "index.html").write_bytes(template.encode("utf-8"))
+    (scratch / "src" / "main.ts").write_bytes(main_ts.encode("utf-8"))
+    done = subprocess.run([bun, "run", "build.ts"], check=False, cwd=scratch, capture_output=True)
+    return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+
+def test_build_script(tmp_path):
+    build_ts = (REPO_ROOT / "dashboard" / "build.ts").read_bytes()
+    main_ts = 'document.title = "x";\n'
+
+    scratch = tmp_path / "one_page"
+    code, _, stderr = run_build(
+        scratch, build_ts, "<html><head><style>b{}</style></head><body>\n<!--bundle-->\n</body></html>\n", main_ts,
+    )
+    assert code == 0, stderr
+    assert set(regular_files(scratch)) == {"build.ts", "index.html", "src/main.ts", "out/dashboard.html"}
+    p = (scratch / "out" / "dashboard.html").read_bytes().decode("utf-8")
+    assert p.startswith('<html><head><style>b{}</style></head><body>\n<script type="module">')
+    assert p.endswith("</script>\n</body></html>\n")
+    assert "<!--bundle-->" not in p
+    assert p.count("<script") == 1
+    assert str(scratch) not in p
+
+    scratch = tmp_path / "marker_twice"
+    code, _, stderr = run_build(
+        scratch, build_ts, "<html><body>\n<!--bundle-->\n<!--bundle-->\n</body></html>\n", main_ts,
+    )
+    assert code != 0
+    assert stderr.strip() == "template must hold the marker once, found 2"
+    assert not (scratch / "out" / "dashboard.html").exists()
+
+    scratch = tmp_path / "no_marker"
+    code, _, stderr = run_build(scratch, build_ts, "<html><body>\n</body></html>\n", main_ts)
+    assert code != 0
+    assert stderr.strip() == "template must hold the marker once, found 0"
+
+    scratch = tmp_path / "bad_bundle"
+    code, _, stderr = run_build(
+        scratch, build_ts, "<html><body>\n<!--bundle-->\n</body></html>\n", 'import "./missing";\n',
+    )
+    assert code != 0
+    assert "\n" not in stderr.strip(), stderr
+    assert stderr.strip().startswith("bundle failed: "), stderr
+
+    text = build_ts.decode("utf-8")
+    for line in (
+        'export const TEMPLATE = "index.html";',
+        'export const ENTRY = "src/main.ts";',
+        'export const MARKER = "<!--bundle-->";',
+        'export const OUT_PAGE = "out/dashboard.html";',
+    ):
+        assert line in text, line
