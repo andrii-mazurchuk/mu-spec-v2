@@ -190,15 +190,28 @@ def amendment(rid: object, title: str, derives_from: list, key: str) -> dict:
     }
 
 
-def message_matches(template: str, message: str, values: tuple[str, ...]) -> bool:
-    """message is template with every literal part as it is and each field one of values."""
+def message_matches(template: str, message: str, values: tuple[str, ...] | None) -> bool:
+    """message is template with every literal part as it is and each field one of values (any text
+    when values is None)."""
     pattern = ""
     for literal, field, spec, conversion in string.Formatter().parse(template):
         pattern += re.escape(literal)
-        if field is not None:
+        if field is not None and values is None:
+            pattern += ".*?"
+        elif field is not None:
             convert = {"r": repr, "s": str, "a": ascii}.get(conversion or "", lambda v: v)
             pattern += "(?:" + "|".join(re.escape(format(convert(v), spec or "")) for v in values) + ")"
     return re.fullmatch(pattern, message, re.DOTALL) is not None
+
+
+def message_at(answer: object, where: list, raw: bytes) -> str:
+    """The refusal message at the path refusal_body puts it."""
+    message = answer
+    for k in where:
+        assert isinstance(message, dict) and k in message, raw
+        message = message[k]
+    assert isinstance(message, str), raw
+    return message
 
 
 def message_path(body: object, message: str) -> list | None:
@@ -255,20 +268,20 @@ def test_replay_conflict_and_refused_key_stays_free(tmp_path):
         assert where is not None, "refusal_body does not carry the refusal's message"
         status, raw, answer = call(unit.base, "submit_amendment", body_a2)
         assert status == conflict.status == 409, raw
-        message = answer
-        for k in where:
-            assert isinstance(message, dict) and k in message, raw
-            message = message[k]
-        assert isinstance(message, str), raw
+        message = message_at(answer, where, raw)
         assert message_matches(conflict.template, message, ("k1", "submit_amendment", "p")), (
             f"{message!r} is not {conflict.template!r}")
         assert Path(record).read_bytes() == b1
 
-        # 4. a call refused by a graph rule stores nothing under its key
+        # 4. a call refused by a graph rule is a catalogued refusal and stores nothing under its key
         body_r = amendment(rid, "keys behaviour, unknown parent", ["I-999"], "k2")
         status, raw, answer = call(unit.base, "submit_amendment", body_r)
-        assert not 200 <= status < 300, raw
+        assert 400 <= status < 500, raw
         assert not (isinstance(answer, dict) and "created" in answer), raw
+        message = message_at(answer, where, raw)
+        assert any(member.status == status and message_matches(member.template, message, None)
+                   for member in CATALOGUE.values()), (
+            f"{status} {message!r} is no catalogued refusal")
         assert Path(record).read_bytes() == b1
 
         # 5. the refused call's key is free: a corrected body is a fresh write
