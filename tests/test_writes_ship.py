@@ -117,20 +117,31 @@ def holds_value(value, wanted):
     return isinstance(value, str) and wanted in value
 
 
-def imported_modules(tree: ast.AST, package: str) -> list[str]:
-    """Every module an Import or ImportFrom in tree names, relative ones resolved against package."""
+def imported_modules(tree: ast.AST, package: str) -> list[tuple[str, ...]]:
+    """For every name an Import or ImportFrom in tree brings in, the modules it may come from.
+
+    `import X` gives (X,); `from X import name` gives (X, X.name), since name may be a submodule;
+    relative ones are resolved against package.
+    """
     names = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names.extend(alias.name for alias in node.names)
+            names.extend((alias.name,) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 parts = package.split(".")
                 base = parts[: len(parts) - node.level + 1]
-                names.append(".".join(base + ([node.module] if node.module else [])))
+                module = ".".join(base + ([node.module] if node.module else []))
             else:
-                names.append(node.module or "")
+                module = node.module or ""
+            names.extend((module, f"{module}.{alias.name}") for alias in node.names)
     return names
+
+
+def import_permitted(candidates: tuple[str, ...]) -> bool:
+    """Whether any module an imported name may come from is in IMPORT_MODULES or IMPORT_ALLOWED."""
+    return any(module in IMPORT_MODULES or module.split(".")[0] in IMPORT_ALLOWED
+               for module in candidates)
 
 
 def test_ship_write_handlers(monkeypatch):
@@ -222,9 +233,10 @@ def test_ship_write_handlers(monkeypatch):
     runs.set_generation_source(lambda p: (order.append("note"), 7)[1])
     real_new_log_record = ship.new_log_record
 
-    def recording_new_log_record(kind, *args, **kwargs):
+    def recording_new_log_record(*args, **kwargs):
+        kind = kwargs["kind"] if "kind" in kwargs else args[0]
         order.append("record:" + kind)
-        return real_new_log_record(kind, *args, **kwargs)
+        return real_new_log_record(*args, **kwargs)
 
     monkeypatch.setattr(ship, "new_log_record", recording_new_log_record)
     r = runs.admit("p", "person_ship", None, 0)
@@ -274,10 +286,9 @@ def test_ship_write_handlers(monkeypatch):
     # 8. every event is in the codec's vocabulary, and the module's imports are only those listed
     assert set(EVENT_KINDS) <= set(CODEC_EVENT_KINDS)
     tree = ast.parse(SHIP_WRITES_SOURCE.read_text(encoding="utf-8"), filename=str(SHIP_WRITES_SOURCE))
-    for module in imported_modules(tree, SHIP_WRITES_PACKAGE):
-        top = module.split(".")[0]
-        assert module in IMPORT_MODULES or top in IMPORT_ALLOWED, (
-            f"mu_spec/writes/ship.py imports {module!r}: it may import only {IMPORT_MODULES}"
+    for candidates in imported_modules(tree, SHIP_WRITES_PACKAGE):
+        assert import_permitted(candidates), (
+            f"mu_spec/writes/ship.py imports {candidates[-1]!r}: it may import only {IMPORT_MODULES}"
         )
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
