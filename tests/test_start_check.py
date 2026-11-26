@@ -64,6 +64,44 @@ def test_variant_set(tmp_path):
             environment(bad, r, {})
 
 
+def test_predicted_counts():
+    from startcheck import predict
+    from startcheck.variants import ALL_VARIANTS, OVERRIDE_VARIANTS, QUICK, VARIANTS
+
+    predicted_outcome = predict.predicted_outcome
+
+    def listening(ids):
+        return {v for v in ids if predicted_outcome(v) == "listening"}
+
+    assert len(listening(VARIANTS)) == 1152  # 3 * 3 * 2 * 4**3
+    assert len(VARIANTS) - len(listening(VARIANTS)) == 2944
+
+    override_listening = {"hhhhhhh", "mhhhhhh", "ehhhhhh", "xhhhhhh"} | {
+        "hhhhhhe",
+        "mhhhhhe",
+        "ehhhhhe",
+    }
+    assert len(listening(OVERRIDE_VARIANTS)) == 7
+    assert listening(OVERRIDE_VARIANTS) == override_listening
+
+    assert len(listening(ALL_VARIANTS)) == 1159
+    assert len(ALL_VARIANTS) - len(listening(ALL_VARIANTS)) == 2949
+
+    assert len(listening(QUICK)) == 16
+    quick_exited = {"xhhhhh", "hxhhhh", "hhehhh", "hhxhhh", "eeeeee", "xxxxxx"}
+    assert set(QUICK) - listening(QUICK) == quick_exited
+
+    assert predicted_outcome("xhhhhhh") == "listening"
+    assert predicted_outcome("xhhhhhe") == "exited"
+    assert predicted_outcome("hhhhhhx") == "exited"
+    for v in ("hhmhhh", "hehhhh", "hhhxxx", "mmmmmm"):
+        assert predicted_outcome(v) == "listening", v
+
+    for bad in ("hhhhh", "hhhhhhm"):
+        with pytest.raises(ValueError):
+            predicted_outcome(bad)
+
+
 BIND_SAMPLES = [
     (
         b"mu-spec cannot bind not a host!:19406: [Errno 11001] getaddrinfo failed\r\n",
