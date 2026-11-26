@@ -37,6 +37,12 @@ def _is_safe(entry: str) -> bool:
     return all(segment not in ("", ".", "..") for segment in segments)
 
 
+def _is_file_under(root: Path, path: Path) -> bool:
+    if not path.is_file():
+        return False
+    return path.resolve().is_relative_to(root)
+
+
 def read_manifest(source_root: Path) -> tuple[str, ...]:
     """Parse source_root/manifest.txt, read as bytes. Returns the entries in file order.
     Raises ManifestError with the first fault found, in this order: manifest_absent, not_utf8,
@@ -85,8 +91,9 @@ def stage(source_root: Path, entries: tuple[str, ...], scratch: Path) -> None:
     not listed is ever copied."""
     if not scratch.is_dir() or any(scratch.iterdir()):
         raise ValueError(f"scratch must be an existing empty folder: {scratch}")
+    root = source_root.resolve()
     for entry in entries:
-        if not (source_root / entry).is_file():
+        if not _is_safe(entry) or not _is_file_under(root, root / entry):
             raise ManifestError(entry, "listed_file_missing")
     for entry in entries:
         target = scratch / entry
