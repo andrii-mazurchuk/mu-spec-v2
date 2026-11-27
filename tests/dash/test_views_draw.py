@@ -330,7 +330,7 @@ def test_draw_states(tmp_path):
                 text = draw({"project": "<b>x</b>", "view": "spine", "filter": None},
                             {"list": {"names": ["<b>x</b>"], "token": "L", "seq": 1}, "screen": {"status": "loading"}})
                 assert "<b>x</b>" in text
-                assert pg.evaluate("() => document.querySelectorAll('b, script, img, a, form').length") == 0
+                assert pg.evaluate("() => document.body.querySelectorAll('b, script, img, a, form').length") == 0
 
                 # 3. the view list's Ship item shows the run while the screen loads
                 draw(choice("spine"), {"list": LIST, "run": run1, "screen": {"status": "loading"}})
