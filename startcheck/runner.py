@@ -2,9 +2,10 @@
 its start, check it is alive, stop it and wait for its port to refuse.
 
 Acceptance and test only; never imported by mu_spec. Both units run under the check's own
-interpreter in isolated mode, the install chosen by argument, never by the environment. A check's
-start goes through a Launcher the caller supplies (the shared interposed launch); a direct start,
-without one, serves only the runner's own self-tests.
+interpreter with LAUNCH_FLAGS (never -I or -E, which would ignore the hash seed), the install chosen
+by argument, never by the environment, and the environment built from scratch: the variant's plus
+the hash seed. A check's start goes through a Launcher the caller supplies (the shared interposed
+launch); a direct start, without one, serves only the runner's own self-tests.
 """
 
 from __future__ import annotations
@@ -22,11 +23,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import IO, Protocol
 
+from mu_spec.config import ROOT_NAME, VALUE_NAMES
 from startcheck.variants import (
     A_FILE,
     FALLBACK_PORT,
     HEALTHY_PORT,
     NO_DIR,
+    PASS_THROUGH,
     PROMPTS,
     STORE,
     WORK,
@@ -40,6 +43,13 @@ REACH_HOST = "127.0.0.1"
 START_OUTCOMES = ("listening", "exited", "hung")
 BOOTSTRAP = ("import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
              "runpy.run_module('mu_spec', run_name='__main__', alter_sys=True)")
+LAUNCH_FLAGS = ("-s",)  # every start: no user site folder; never -I or -E, which ignore the seed
+HASH_SEED_NAME = "PYTHONHASHSEED"  # the one PYTHON* variable that ever reaches a unit
+DEFAULT_HASH_SEED = 0  # the seed when the test chooses none (0 turns hash randomisation off)
+HASH_SEED_RANGE = (0, 4294967295)  # inclusive; the values the interpreter accepts for it
+WINDOWS_REQUIRED = ("SYSTEMROOT",)  # names every start's environment must hold on win32
+# Every name start_env can ever hold; a launcher's extra_env may hold none of them.
+RESERVED_NAMES = PASS_THROUGH + VALUE_NAMES + (ROOT_NAME, HASH_SEED_NAME)
 
 _CONNECT_TIMEOUT_S = 5.0
 
@@ -51,7 +61,8 @@ class RunnerError(Exception):
 @dataclass(frozen=True)
 class UnitCommand:
     label: str  # 'running' or 'rebuilt'
-    install_root: str  # absolute folder holding that unit's mu_spec package (and its .git)
+    install_root: str  # absolute folder holding that unit's mu_spec package
+    hash_seed: int | None = None  # None means DEFAULT_HASH_SEED
 
 
 @dataclass(frozen=True)
@@ -107,8 +118,51 @@ class Started:
     _done: bool = field(default=False, repr=False)
 
 
+def effective_seed(cmd: UnitCommand) -> int:
+    return DEFAULT_HASH_SEED if cmd.hash_seed is None else cmd.hash_seed
+
+
+def interpreter_flags(cmd: UnitCommand) -> tuple[str, ...]:
+    return LAUNCH_FLAGS
+
+
+def seed_env(cmd: UnitCommand) -> dict[str, str]:
+    return {HASH_SEED_NAME: str(effective_seed(cmd))}
+
+
+def start_env(
+    cmd: UnitCommand, variant: str, check_root: str, own_env: Mapping[str, str]
+) -> dict[str, str]:
+    """The variant's environment, built from scratch, plus the hash seed."""
+    return environment(variant, check_root, own_env) | seed_env(cmd)
+
+
 def unit_argv(cmd: UnitCommand) -> tuple[str, ...]:
-    return (sys.executable, "-I", "-c", BOOTSTRAP, cmd.install_root)
+    return (sys.executable, *interpreter_flags(cmd), "-c", BOOTSTRAP, cmd.install_root)
+
+
+def _check_seed(cmd: UnitCommand) -> None:
+    seed = cmd.hash_seed
+    if seed is None:
+        return
+    low, high = HASH_SEED_RANGE
+    if isinstance(seed, bool) or not isinstance(seed, int) or not low <= seed <= high:
+        raise ValueError(f"hash_seed of {cmd.label} is {seed!r}, not an int in {HASH_SEED_RANGE}")
+
+
+def _check_prepared(cmd: UnitCommand, prepared: Prepared) -> None:
+    """Refuse a launch that would defeat the seed or set a name the start owns."""
+    argv = tuple(prepared.argv)
+    if not argv or argv[0] != sys.executable or "-c" not in argv[1:]:
+        raise RunnerError(f"launcher for {cmd.label} gives {argv!r}, not {sys.executable} ... -c")
+    flags = argv[1 : argv.index("-c", 1)]
+    if flags != interpreter_flags(cmd):
+        raise RunnerError(f"launcher for {cmd.label} starts it with {flags!r}, "
+                          f"not {interpreter_flags(cmd)!r}")
+    reserved = sorted(set(prepared.extra_env) & set(RESERVED_NAMES))
+    if reserved:
+        raise RunnerError(f"launcher for {cmd.label} sets {', '.join(reserved)}, "
+                          f"which the start itself owns")
 
 
 def _remove(path: str) -> None:
@@ -182,20 +236,27 @@ def start(
     launcher: Launcher | None = None,
 ) -> Started:
     """Start one unit on a variant and class its start as listening, exited or hung."""
-    for guarded in (HEALTHY_PORT, FALLBACK_PORT):
-        if not _refused(guarded):
-            raise RunnerError(f"port {guarded} answers before starting {cmd.label}")
-    env = environment(variant, check_root, own_env)
+    _check_seed(cmd)
+    env = start_env(cmd, variant, check_root, own_env)
     prepared = None
     argv = unit_argv(cmd)
     if launcher is not None:
         prepared = launcher.prepare(cmd, check_root)
-        clash = sorted(set(prepared.extra_env) & set(env))
-        if clash:
-            raise RunnerError(f"launcher for {cmd.label} sets {', '.join(clash)}, "
-                              f"which the variant's environment sets")
+        _check_prepared(cmd, prepared)
         env.update(prepared.extra_env)
-        argv = prepared.argv
+        argv = tuple(prepared.argv)
+    if sys.platform == "win32":
+        missing = [name for name in WINDOWS_REQUIRED if name not in env]
+        if missing:
+            raise RunnerError(f"the environment of {cmd.label} lacks {', '.join(missing)}, "
+                              f"without which it cannot listen on Windows")
+    for guarded in (HEALTHY_PORT, FALLBACK_PORT):
+        if not _refused(guarded):
+            raise RunnerError(f"port {guarded} answers before starting {cmd.label}")
+    stray = sorted(n for n in env if n.upper().startswith("PYTHON") and n != HASH_SEED_NAME)
+    if stray:
+        raise RunnerError(f"the environment of {cmd.label} holds {', '.join(stray)}, "
+                          f"which would reach the unit")
     port = reach_port(variant)
     began = time.monotonic()
     proc = subprocess.Popen(
