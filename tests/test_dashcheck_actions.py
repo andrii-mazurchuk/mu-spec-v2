@@ -41,37 +41,58 @@ BUILD_TIMEOUT_S = 120.0
 
 # --- the acceptance inputs ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
-def inputs(tmp_path_factory):
-    """running_install, staged_store and pristine_prompts, as S-484's acceptance_inputs gives them."""
-    running_install = os.environ.get(REFERENCE_INSTALL_VAR)
-    if not running_install:
-        pytest.fail(f"{REFERENCE_INSTALL_VAR} is not set: the acceptance checks need it", pytrace=False)
-    if not os.path.isdir(running_install):
-        pytest.fail(f"{REFERENCE_INSTALL_VAR}={running_install!r} does not name a directory", pytrace=False)
-    pristine_projects = os.environ.get(ACCEPTANCE_STORE_VAR)
-    if not pristine_projects:
-        pytest.fail(f"{ACCEPTANCE_STORE_VAR} is not set: the acceptance checks need it", pytrace=False)
-    if not os.path.isdir(pristine_projects):
-        pytest.fail(f"{ACCEPTANCE_STORE_VAR}={pristine_projects!r} does not name a directory", pytrace=False)
-    staged = tmp_path_factory.mktemp("staged_store")
-    shutil.copytree(pristine_projects, staged / "projects")
-    return SimpleNamespace(running_install=os.path.abspath(running_install), staged_store=str(staged),
-                           pristine_prompts=os.path.join(os.path.abspath(running_install), "prompts"))
+class Acceptance:
+    """The acceptance inputs and S-451's verdicts, each made once per session on first use. Nothing is
+    read in fixture setup: a test reaches them only after importing the modules it judges, so an unset
+    variable never hides the absent implementation behind a setup error."""
+
+    def __init__(self, tmp_path_factory):
+        self.factory = tmp_path_factory
+        self._inputs = None
+        self._verdicts = None
+
+    def inputs(self):
+        """running_install, staged_store and pristine_prompts, as S-484's acceptance_inputs gives them."""
+        if self._inputs is None:
+            running_install = os.environ.get(REFERENCE_INSTALL_VAR)
+            if not running_install:
+                pytest.fail(f"{REFERENCE_INSTALL_VAR} is not set: the acceptance checks need it", pytrace=False)
+            if not os.path.isdir(running_install):
+                pytest.fail(f"{REFERENCE_INSTALL_VAR}={running_install!r} does not name a directory",
+                            pytrace=False)
+            pristine_projects = os.environ.get(ACCEPTANCE_STORE_VAR)
+            if not pristine_projects:
+                pytest.fail(f"{ACCEPTANCE_STORE_VAR} is not set: the acceptance checks need it", pytrace=False)
+            if not os.path.isdir(pristine_projects):
+                pytest.fail(f"{ACCEPTANCE_STORE_VAR}={pristine_projects!r} does not name a directory",
+                            pytrace=False)
+            staged = self.factory.mktemp("staged_store")
+            shutil.copytree(pristine_projects, staged / "projects")
+            self._inputs = SimpleNamespace(
+                running_install=os.path.abspath(running_install), staged_store=str(staged),
+                pristine_prompts=os.path.join(os.path.abspath(running_install), "prompts"))
+        return self._inputs
+
+    def action_verdicts(self):
+        """S-451 run's verdicts over the running and the rebuilt unit, run once before the page check."""
+        if self._verdicts is None:
+            from actioncheck import run
+            from startcheck.ownenv import own_env
+
+            from startcheck.runner import UnitCommand
+
+            inputs = self.inputs()
+            running = UnitCommand("running", inputs.running_install)
+            rebuilt = UnitCommand("rebuilt", str(REPO))
+            root = self.factory.mktemp("action_check")
+            self._verdicts = run(running, rebuilt, str(root), inputs.staged_store, inputs.pristine_prompts,
+                                 own_env())
+        return self._verdicts
 
 
 @pytest.fixture(scope="session")
-def action_verdicts(inputs, tmp_path_factory):
-    """S-451 run's verdicts over the running and the rebuilt unit, run once before the page check."""
-    from actioncheck import run
-    from startcheck.ownenv import own_env
-
-    from startcheck.runner import UnitCommand
-
-    running = UnitCommand("running", inputs.running_install)
-    rebuilt = UnitCommand("rebuilt", str(REPO))
-    root = tmp_path_factory.mktemp("action_check")
-    return run(running, rebuilt, str(root), inputs.staged_store, inputs.pristine_prompts, own_env())
+def acceptance(tmp_path_factory):
+    return Acceptance(tmp_path_factory)
 
 
 def check_root(tmp_path, name="check"):
@@ -275,12 +296,14 @@ def build_variant(where, rel, edit):
 # --- T-455 ------------------------------------------------------------------------------------------------
 
 @pytest.mark.acceptance
-def test_action_page_check_end_to_end(tmp_path, inputs, action_verdicts):
+def test_action_page_check_end_to_end(tmp_path, acceptance):
     from actioncheck import prepare
     from dashcheck.actions import run
     from startcheck.ownenv import own_env
 
     from startcheck.runner import UnitCommand
+
+    inputs, action_verdicts = acceptance.inputs(), acceptance.action_verdicts()
 
     projects = reference_projects(inputs, check_root(tmp_path, "listing"))
     rebuilt = UnitCommand("rebuilt", str(REPO))
@@ -308,7 +331,7 @@ def test_action_page_check_end_to_end(tmp_path, inputs, action_verdicts):
 # --- T-456 ------------------------------------------------------------------------------------------------
 
 @pytest.mark.acceptance
-def test_page_variants_fail(tmp_path, inputs, action_verdicts):
+def test_page_variants_fail(tmp_path, acceptance):
     from actioncheck import prepare
     from dashcheck.actions import run
     from dashcheck.forms import read_tables
@@ -316,6 +339,8 @@ def test_page_variants_fail(tmp_path, inputs, action_verdicts):
     from startcheck.ownenv import own_env
 
     from startcheck.runner import UnitCommand
+
+    inputs, action_verdicts = acceptance.inputs(), acceptance.action_verdicts()
 
     give_up_status, _ = NODE_GIVE_UP
     shipped = read_tables(str(DASHBOARD))["refusal_forms"]["set_repo"][0]
@@ -466,10 +491,12 @@ class FakeUnit:
 
 
 @pytest.mark.acceptance
-def test_ranked_projects_order(tmp_path, inputs):
+def test_ranked_projects_order(tmp_path, acceptance):
     from dashcheck.actions import ranked_projects
 
     from startcheck.runner import REACH_HOST, UnitCommand, stop
+
+    inputs = acceptance.inputs()
 
     # LP and SP recorded from the reference install on a restored acceptance copy
     started = started_on_copy(UnitCommand("running", inputs.running_install), check_root(tmp_path), inputs)
@@ -516,11 +543,13 @@ def stored_files(root):
 
 
 @pytest.mark.acceptance
-def test_ranked_projects_on_the_copy(tmp_path, inputs):
+def test_ranked_projects_on_the_copy(tmp_path, acceptance):
     from dashcheck.actions import ranked_projects, scenarios
 
     from startcheck.runner import UnitCommand, stop
     from startcheck.variants import STORE
+
+    inputs = acceptance.inputs()
 
     # EXPECT from the reference unit alone, on its own copy
     started = started_on_copy(UnitCommand("running", inputs.running_install), check_root(tmp_path, "running"),
@@ -553,12 +582,14 @@ def test_ranked_projects_on_the_copy(tmp_path, inputs):
 # --- T-465 ------------------------------------------------------------------------------------------------
 
 @pytest.mark.acceptance
-def test_run_prepares_and_needs_both_units(tmp_path, inputs, monkeypatch):
+def test_run_prepares_and_needs_both_units(tmp_path, acceptance, monkeypatch):
     import actioncheck
     from dashcheck import actions
     from startcheck.ownenv import own_env
 
     from startcheck.runner import UnitCommand
+
+    inputs = acceptance.inputs()
 
     events = []
     real_restore, real_launch, real_ranked = actions.restore, actions.launch, actions.ranked_projects
