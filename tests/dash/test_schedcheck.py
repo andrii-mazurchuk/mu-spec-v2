@@ -100,8 +100,12 @@ def test_schedcheck_passes_and_is_deterministic():
 
     # 3. The report names 200 batches and gives every one of the 26 counters a value of at least 1.
     out = first.stdout
-    assert re.search(rf"\b{BATCHES}\b", out), "the report does not name 200 batches"
-    assert re.search(r"batch", out, flags=re.IGNORECASE), "the report does not name its batches"
+    # 200 and "batch" must be adjacent tokens ("200 batches", "batches: 200", "BATCHES = 200"), so a
+    # report of "5 batches, 200 traces" does not pass.
+    names_batches = rf"\b{BATCHES}\s+batch|\bbatch\w*\s*[:=]?\s*{BATCHES}\b"
+    assert any(
+        re.search(names_batches, line, flags=re.IGNORECASE) for line in out.splitlines()
+    ), "the report does not name 200 batches"
     for name in COUNTERS:
         counts = [n for line in out.splitlines() for n in [first_count_after(line, name)] if n is not None]
         assert counts, f"the report gives no value for counter {name}"
