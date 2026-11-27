@@ -5,15 +5,15 @@ tests that need it. The quick run judges the running unit, the install at MU_SPE
 against the rebuilt unit, this repository.
 """
 
-import importlib.util
+import ast
+import inspect
 import json
 import os
 import socket
-import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Mapping
+import types
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,6 @@ import pytest
 HEALTHY_SHA = "0123456789abcdef0123456789abcdef01234567"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_VAR = "MU_SPEC_REFERENCE_INSTALL"
-STORE_VAR = "MU_SPEC_ACCEPTANCE_STORE"
 
 
 def test_variant_set(tmp_path):
@@ -899,129 +898,148 @@ def test_quick_variants(tmp_path):
     assert len(controls) == 44, detail
 
 
-def _acceptance_conftest():
-    """tests/acceptance/conftest.py, loaded by path: pytest reads it only when collecting that folder."""
-    path = REPO_ROOT / "tests" / "acceptance" / "conftest.py"
-    spec = importlib.util.spec_from_file_location("_acceptance_conftest", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _complete_install(root):
+    """A complete fake install: mu_spec/__init__.py and mu_spec/main.py, and a prompts folder beside it."""
+    _fake_install(root, program="pass\n")
+    (root / "prompts").mkdir()
+    return root
 
 
-class _Recorded(Mapping):
-    """A Mapping over d that records every key looked up, tested or iterated."""
-
-    def __init__(self, d):
-        self._d = dict(d)
-        self.keys_read = set()
-
-    def __getitem__(self, key):
-        self.keys_read.add(key)
-        return self._d[key]
-
-    def get(self, key, default=None):
-        self.keys_read.add(key)
-        return self._d.get(key, default)
-
-    def __contains__(self, key):
-        self.keys_read.add(key)
-        return key in self._d
-
-    def __iter__(self):
-        for key in self._d:
-            self.keys_read.add(key)
-            yield key
-
-    def __len__(self):
-        return len(self._d)
+def _docstrings(tree):
+    """The string constants that are docstrings of the module, a class or a function."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                found.add(id(body[0].value))
+    return found
 
 
-def test_read_inputs(tmp_path):
-    conftest = _acceptance_conftest()
-    InputsMissing, read_inputs = conftest.InputsMissing, conftest.read_inputs
+def _outside_package(module):
+    return module in ("tests", "mu_spec") or module.startswith(("tests.", "mu_spec."))
 
-    def install(name, main_is_file=True, prompts="dir"):
-        root = tmp_path / name
-        (root / "mu_spec").mkdir(parents=True)
-        main = root / "mu_spec" / "__main__.py"
-        if main_is_file:
-            main.write_text("")
-        else:
-            main.mkdir()
-        if prompts == "dir":
-            (root / "prompts").mkdir()
-        elif prompts == "file":
-            (root / "prompts").write_text("")
-        return root
 
-    inst = install("inst")
-    nopkg = tmp_path / "nopkg"
-    nopkg.mkdir()
-    dirpkg = install("dirpkg", main_is_file=False)
-    noprm = install("noprm", prompts=None)
-    filep = install("filep", prompts="file")
-    store = tmp_path / "store"
-    store.mkdir()
+def test_inputs_module_reads_nothing(tmp_path, monkeypatch):
+    import startcheck.inputs
+    from startcheck.inputs import unit_commands
+    from startcheck.runner import UnitCommand
+
+    src = inspect.getsourcefile(startcheck.inputs)
+    tree = ast.parse(Path(src).read_text(encoding="utf-8"))
+    docstrings = _docstrings(tree)
+    env_names = {"environ", "getenv", "environb"}
+    faults = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in env_names:
+            faults.append(f"name {node.id} at line {node.lineno}")
+        elif isinstance(node, ast.Attribute) and node.attr in env_names:
+            faults.append(f"attribute .{node.attr} at line {node.lineno}")
+        elif isinstance(node, ast.alias) and (
+            node.name.split(".")[-1] in env_names or node.asname in env_names
+        ):
+            faults.append(f"import of {node.name}")
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and id(node) not in docstrings and node.value.startswith("MU_SPEC_")):
+            faults.append(f"literal {node.value!r} at line {node.lineno}")
+        elif isinstance(node, ast.Import):
+            faults += [f"import {a.name}" for a in node.names if _outside_package(a.name)]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and _outside_package(node.module or ""):
+                faults.append(f"from {node.module} import")
+            elif node.level > 0 and not (
+                node.level == 1
+                and (node.module == "runner"
+                     or (node.module is None and all(a.name == "runner" for a in node.names)))
+            ):
+                faults.append(f"relative import from {'.' * node.level}{node.module or ''}")
+        elif (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and node.name in ("acceptance_inputs", "rebuilt_package")):
+            faults.append(f"function {node.name}")
+    assert faults == [], faults
+
+    a = _complete_install(tmp_path / "a")
+    b = _complete_install(tmp_path / "b")
+    ns = types.SimpleNamespace(running_install=str(a), rebuilt_install=str(b),
+                               pristine_prompts=str(a / "prompts"))
+    expected = (UnitCommand("running", str(a)), UnitCommand("rebuilt", str(b)))
+    gone = str(tmp_path / "gone")
+    monkeypatch.setenv("MU_SPEC_REFERENCE_INSTALL", gone)
+    monkeypatch.setenv("MU_SPEC_ACCEPTANCE_STORE", gone)
+    monkeypatch.setenv("MU_SPEC_RUNNING_INSTALL", str(b))
+    assert unit_commands(ns, REFERENCE_VAR) == expected
+    for name in ("MU_SPEC_REFERENCE_INSTALL", "MU_SPEC_ACCEPTANCE_STORE", "MU_SPEC_RUNNING_INSTALL"):
+        monkeypatch.delenv(name)
+    assert unit_commands(ns, REFERENCE_VAR) == expected
+
+
+def test_unit_commands(tmp_path):
+    from startcheck.inputs import (
+        NO_PROMPTS_TEXT,
+        NO_UNIT_TEXT,
+        SAME_INSTALL_TEXT,
+        NotAUnit,
+        entry_path,
+        holds_unit,
+        unit_commands,
+    )
+    from startcheck.runner import UnitCommand
+
+    a = _complete_install(tmp_path / "a")
+    b = _complete_install(tmp_path / "b")
+    mainonly = _fake_install(tmp_path / "mainonly", package_main="")
+    dirmain = _fake_install(tmp_path / "dirmain")
+    (dirmain / "mu_spec" / "main.py").mkdir()
     gone = tmp_path / "gone"
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    R, S = REFERENCE_VAR, STORE_VAR
+    V = REFERENCE_VAR
+    assert not (a / "mu_spec" / "__main__.py").exists()
+    assert not (mainonly / "mu_spec" / "main.py").exists()
 
-    def err(env, repo_root=repo):
-        with pytest.raises(InputsMissing) as caught:
-            read_inputs(env, repo_root)
+    def NS(r, q, p):
+        return types.SimpleNamespace(running_install=str(r), rebuilt_install=str(q),
+                                     pristine_prompts=str(p))
+
+    messages = []
+
+    def msg(ns, var=V):
+        with pytest.raises(NotAUnit) as caught:
+            unit_commands(ns, var)
+        messages.append(caught.value.message)
         return caught.value.message
 
-    assert err({}) == f"acceptance input {R} is not set"
-    assert err({R: ""}) == f"acceptance input {R} is not set"
-    assert err({R: str(inst)}) == f"acceptance input {S} is not set"
-    # both variables are checked before the package
-    assert err({R: str(nopkg), S: ""}) == f"acceptance input {S} is not set"
+    def NU(label, r):
+        return NO_UNIT_TEXT.format(label=label, root=str(r), entry=entry_path(str(r)))
 
-    assert err({R: str(gone), S: str(store)}) == f"acceptance input {R} names no directory: {gone}"
-    assert err({R: str(inst), S: str(gone)}) == f"acceptance input {S} names no directory: {gone}"
+    assert NO_UNIT_TEXT == "{label} install {root!r} holds no unit: {entry!r} is not a regular file"
+    assert SAME_INSTALL_TEXT == "{name}={root!r} names the rebuilt install, not the running unit"
+    assert NO_PROMPTS_TEXT == "{name}={root!r} holds no prompts folder: {prompts!r}"
 
-    for v in (str(nopkg), str(dirpkg)):
-        assert err({R: v, S: str(store)}) == f"acceptance input {R} holds no mu_spec package: {v}"
+    assert entry_path(str(a)) == os.path.join(str(a), "mu_spec", "main.py")
+    assert holds_unit(str(a)) is True
+    for r in (mainonly, dirmain, gone):
+        assert holds_unit(str(r)) is False, r
 
-    v = str(inst / "mu_spec" / "..")
-    assert err({R: v, S: str(store)}, repo_root=inst) == (
-        f"acceptance input {R} names this repository, not the running unit: {v}"
-    )
+    commands = unit_commands(NS(a, b, a / "prompts"), V)
+    assert commands == (UnitCommand("running", str(a)), UnitCommand("rebuilt", str(b)))
+    assert commands[0].hash_seed is None and commands[1].hash_seed is None
 
-    for v in (str(noprm), str(filep)):
-        assert err({R: v, S: str(store)}) == f"acceptance input {R} holds no prompts folder: {v}"
+    for r in (mainonly, dirmain, gone):
+        assert msg(NS(r, b, a / "prompts")) == NU("running", r)
+    assert msg(NS(a, mainonly, a / "prompts")) == NU("rebuilt", mainonly)
 
-    e = _Recorded({R: str(inst / "mu_spec" / ".."), S: str(store / "."), "MU_SPEC_PORT": "x"})
-    assert read_inputs(e, repo) == (inst.resolve(), store.resolve(), (inst / "prompts").resolve())
-    assert e.keys_read <= {R, S}, e.keys_read
+    # order: running start file, rebuilt start file, distinct installs, prompts folder
+    assert msg(NS(mainonly, dirmain, gone)) == NU("running", mainonly)
+    assert msg(NS(a, dirmain, gone)) == NU("rebuilt", dirmain)
 
+    alias = os.path.join(str(a), "mu_spec", "..")
+    assert msg(NS(a, alias, a / "prompts")) == SAME_INSTALL_TEXT.format(name=V, root=str(a))
+    assert msg(NS(a, alias, a / "prompts"), "X") == SAME_INSTALL_TEXT.format(name="X", root=str(a))
+    assert msg(NS(a, a, gone)) == SAME_INSTALL_TEXT.format(name=V, root=str(a))
 
-def test_acceptance_fixture_fails_never_skips(tmp_path):
-    base = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in (REFERENCE_VAR, STORE_VAR, "PYTEST_ADDOPTS")
-    }
-    inst = tmp_path / "inst"
-    (inst / "mu_spec").mkdir(parents=True)
-    (inst / "mu_spec" / "__main__.py").write_text("")
-    (inst / "prompts").mkdir()
-    argv = [sys.executable, "-m", "pytest", "tests/acceptance", "-k", "test_quick_variants",
-            "-p", "no:cacheprovider", "-rA"]
+    assert msg(NS(a, b, gone)) == NO_PROMPTS_TEXT.format(name=V, root=str(a), prompts=str(gone))
+    p = entry_path(str(a))
+    assert msg(NS(a, b, p)) == NO_PROMPTS_TEXT.format(name=V, root=str(a), prompts=p)
 
-    def run(env):
-        done = subprocess.run(argv, check=False, cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, timeout=300)
-        lines = [line for line in done.stdout.splitlines() if line.strip()]
-        return done.returncode, done.stdout, lines[-1] if lines else ""
-
-    code, out, summary = run(base)
-    assert code == 1, out
-    assert f"acceptance input {REFERENCE_VAR} is not set" in out, out
-    assert "skipped" not in summary and "passed" not in summary, summary
-
-    code, out, summary = run(base | {REFERENCE_VAR: str(inst)})
-    assert code == 1, out
-    assert f"acceptance input {STORE_VAR} is not set" in out, out
-    assert "skipped" not in summary, summary
+    for m in messages:
+        assert "\n" not in m, m
