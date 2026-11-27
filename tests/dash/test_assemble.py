@@ -5,7 +5,8 @@ Stamps, the published list names exactly the registry's projects, the parts hand
 one marker, its nonce and the very Stamps, and the Stamps' one observer is taken; and that, with a fake
 Ship part and a fake Dispatcher, the generation source is set to stamps.generation before the
 dispatcher is constructed and started, the dispatcher is given the store's read_inbox and the Ship
-part's identity as bound methods and not their results, and start is given the store's whole log.
+part's identity as bound methods and not their results, and start is given the store's whole log (two
+records of different kinds and projects, appended before the runtime is built), in full and in order.
 Modules under test are imported inside the test, so a module not yet written fails only the tests that
 need it.
 """
@@ -44,8 +45,8 @@ def set_environment(monkeypatch, **texts: str) -> None:
         monkeypatch.setenv(ENV_NAMES[field], text)
 
 
-def store_copy(tmp_path, monkeypatch, directory: str) -> None:
-    """A temporary store holding every one of NAMES, the environment naming it."""
+def store_copy(tmp_path, monkeypatch, directory: str):
+    """A temporary store holding every one of NAMES, the environment naming it; answers the Store."""
     from mu_spec.codec import ProjectRecord
     from mu_spec.store import Store
 
@@ -60,6 +61,20 @@ def store_copy(tmp_path, monkeypatch, directory: str) -> None:
         store.create_project(ProjectRecord.from_doc(name, dict(DOC, name=name)))
     monkeypatch.chdir(cwd)
     set_environment(monkeypatch, port="9100", state_dir=str(D))
+    return store
+
+
+def append_two_records(store) -> None:
+    """Two log records a filter by project or by kind would tell apart: a mutation of a project, then
+    a record of another kind with no project."""
+    import datetime
+
+    from mu_spec.codec import EVENT_KINDS, MUTATION_KIND, new_log_record
+
+    at = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    other = min(EVENT_KINDS - {MUTATION_KIND})
+    store.append_log(new_log_record(MUTATION_KIND, NAMES[0], [], {"note": "first"}, at))
+    store.append_log(new_log_record(other, None, [], {"note": "second"}, at))
 
 
 class FakeMarker:
@@ -153,7 +168,7 @@ def test_build_dash_parts_order(tmp_path, monkeypatch):
     # Arrange B: a fake Ship part and a fake Dispatcher, both listing their calls in one shared list
     order: list = []
     made: list = []
-    store_copy(tmp_path, monkeypatch, "b")
+    append_two_records(store_copy(tmp_path, monkeypatch, "b"))
     fake_ship = FakeShip(order)
     stamps = Stamps()
     runtime = build_runtime(ship_builder=lambda client: fake_ship, observer=stamps, github=FakeGitHub())
@@ -175,7 +190,12 @@ def test_build_dash_parts_order(tmp_path, monkeypatch):
     assert given["identity"] == fake_ship.identity
     assert inspect.ismethod(given["identity"]) and given["identity"].__self__ is fake_ship
     assert len(made[0].logs) == 1
-    assert list(made[0].logs[0]) == list(runtime.store.read_log())
+    whole = list(runtime.store.read_log())
+    assert len(whole) == 2
+    assert {record.project for record in whole} == {NAMES[0], None}
+    assert len({record.kind for record in whole}) == 2
+    given_log = list(made[0].logs[0])
+    assert [record.doc for record in given_log] == [record.doc for record in whole]
 
     # the rest of what the dispatcher is handed, as S-356 names it, and no worker factory
     assert given["stamps"] is stamps
