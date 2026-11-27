@@ -5,11 +5,14 @@ tests that need it. The quick run judges the running unit, the install at MU_SPE
 against the rebuilt unit, this repository.
 """
 
+import importlib.util
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,7 @@ import pytest
 HEALTHY_SHA = "0123456789abcdef0123456789abcdef01234567"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_VAR = "MU_SPEC_REFERENCE_INSTALL"
+STORE_VAR = "MU_SPEC_ACCEPTANCE_STORE"
 
 
 def test_variant_set(tmp_path):
@@ -863,3 +867,131 @@ def test_quick_variants(tmp_path):
     assert report.passed is True, detail
     # both units of each variant started through the launcher, one prepare per start
     assert len(controls) == 44, detail
+
+
+def _acceptance_conftest():
+    """tests/acceptance/conftest.py, loaded by path: pytest reads it only when collecting that folder."""
+    path = REPO_ROOT / "tests" / "acceptance" / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_acceptance_conftest", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Recorded(Mapping):
+    """A Mapping over d that records every key looked up, tested or iterated."""
+
+    def __init__(self, d):
+        self._d = dict(d)
+        self.keys_read = set()
+
+    def __getitem__(self, key):
+        self.keys_read.add(key)
+        return self._d[key]
+
+    def get(self, key, default=None):
+        self.keys_read.add(key)
+        return self._d.get(key, default)
+
+    def __contains__(self, key):
+        self.keys_read.add(key)
+        return key in self._d
+
+    def __iter__(self):
+        for key in self._d:
+            self.keys_read.add(key)
+            yield key
+
+    def __len__(self):
+        return len(self._d)
+
+
+def test_read_inputs(tmp_path):
+    conftest = _acceptance_conftest()
+    InputsMissing, read_inputs = conftest.InputsMissing, conftest.read_inputs
+
+    def install(name, main_is_file=True, prompts="dir"):
+        root = tmp_path / name
+        (root / "mu_spec").mkdir(parents=True)
+        main = root / "mu_spec" / "__main__.py"
+        if main_is_file:
+            main.write_text("")
+        else:
+            main.mkdir()
+        if prompts == "dir":
+            (root / "prompts").mkdir()
+        elif prompts == "file":
+            (root / "prompts").write_text("")
+        return root
+
+    inst = install("inst")
+    nopkg = tmp_path / "nopkg"
+    nopkg.mkdir()
+    dirpkg = install("dirpkg", main_is_file=False)
+    noprm = install("noprm", prompts=None)
+    filep = install("filep", prompts="file")
+    store = tmp_path / "store"
+    store.mkdir()
+    gone = tmp_path / "gone"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    R, S = REFERENCE_VAR, STORE_VAR
+
+    def err(env, repo_root=repo):
+        with pytest.raises(InputsMissing) as caught:
+            read_inputs(env, repo_root)
+        return caught.value.message
+
+    assert err({}) == f"acceptance input {R} is not set"
+    assert err({R: ""}) == f"acceptance input {R} is not set"
+    assert err({R: str(inst)}) == f"acceptance input {S} is not set"
+    # both variables are checked before the package
+    assert err({R: str(nopkg), S: ""}) == f"acceptance input {S} is not set"
+
+    assert err({R: str(gone), S: str(store)}) == f"acceptance input {R} names no directory: {gone}"
+    assert err({R: str(inst), S: str(gone)}) == f"acceptance input {S} names no directory: {gone}"
+
+    for v in (str(nopkg), str(dirpkg)):
+        assert err({R: v, S: str(store)}) == f"acceptance input {R} holds no mu_spec package: {v}"
+
+    v = str(inst / "mu_spec" / "..")
+    assert err({R: v, S: str(store)}, repo_root=inst) == (
+        f"acceptance input {R} names this repository, not the running unit: {v}"
+    )
+
+    for v in (str(noprm), str(filep)):
+        assert err({R: v, S: str(store)}) == f"acceptance input {R} holds no prompts folder: {v}"
+
+    e = _Recorded({R: str(inst / "mu_spec" / ".."), S: str(store / "."), "MU_SPEC_PORT": "x"})
+    assert read_inputs(e, repo) == (inst.resolve(), store.resolve(), (inst / "prompts").resolve())
+    assert e.keys_read <= {R, S}, e.keys_read
+
+
+def test_acceptance_fixture_fails_never_skips(tmp_path):
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in (REFERENCE_VAR, STORE_VAR, "PYTEST_ADDOPTS")
+    }
+    inst = tmp_path / "inst"
+    (inst / "mu_spec").mkdir(parents=True)
+    (inst / "mu_spec" / "__main__.py").write_text("")
+    (inst / "prompts").mkdir()
+    argv = [sys.executable, "-m", "pytest", "tests/acceptance", "-k", "test_quick_variants",
+            "-p", "no:cacheprovider", "-rA"]
+
+    def run(env):
+        done = subprocess.run(argv, check=False, cwd=REPO_ROOT, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True, timeout=300)
+        lines = [line for line in done.stdout.splitlines() if line.strip()]
+        return done.returncode, done.stdout, lines[-1] if lines else ""
+
+    code, out, summary = run(base)
+    assert code == 1, out
+    assert f"acceptance input {REFERENCE_VAR} is not set" in out, out
+    assert "skipped" not in summary and "passed" not in summary, summary
+
+    code, out, summary = run(base | {REFERENCE_VAR: str(inst)})
+    assert code == 1, out
+    assert f"acceptance input {STORE_VAR} is not set" in out, out
+    assert "skipped" not in summary, summary
