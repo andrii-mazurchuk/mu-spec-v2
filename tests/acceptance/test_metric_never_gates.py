@@ -224,14 +224,18 @@ def run_running(script: Script) -> list[tuple[str, str]]:
     return pairs + [("mg-one", "mg-many")]
 
 
-def test_measured_value_never_changes_admission(acceptance_inputs, tmp_path):
-    from startcheck.ownenv import own_env
+def test_measured_value_never_changes_admission(request, tmp_path):
+    # S-484's session fixture, looked up in the test after its conftest is imported: a conftest
+    # not yet written then fails this test as a missing module, not its setup.
     from tests.acceptance.conftest import call, fill
+
+    inputs = request.getfixturevalue("acceptance_inputs")
+
+    from startcheck.ownenv import own_env
     from unitcheck.session import open_session
 
     from startcheck.runner import UnitCommand, restore, start, stop
 
-    inputs = acceptance_inputs
     ratify = ratify_route(inputs.rebuilt_install)
     root = tmp_path / "check"
     root.mkdir()
