@@ -315,3 +315,83 @@ def test_bind_line_reading():
     empty_host = b"mu-spec cannot bind :9006: x\n"
     assert bind_match(empty_host, empty_host) is False
     assert bind_match(b"Traceback (most recent call last):\n", b"") is None
+
+
+def test_variant_passed_rule():
+    from dataclasses import replace
+
+    from startcheck.verdicts import (
+        CallVerdict,
+        VariantVerdict,
+        exit_class,
+        variant_passed,
+    )
+
+    base = VariantVerdict(
+        variant="hhhhhh",
+        predicted="listening",
+        running_outcome="listening",
+        rebuilt_outcome="listening",
+        running_exit_class=None,
+        rebuilt_exit_class=None,
+        outcome_match=True,
+        exit_class_match=True,
+        prediction_fault=False,
+        running_bind_line=False,
+        bind_match=None,
+        install_values_checked=False,
+        install_values_ok=True,
+        health_answered=True,
+        calls=(CallVerdict(0, True, True), CallVerdict(1, True, True)),
+        both_alive=True,
+        passed=True,
+    )
+    ex = replace(
+        base,
+        running_outcome="exited",
+        rebuilt_outcome="exited",
+        running_exit_class="nonzero",
+        rebuilt_exit_class="nonzero",
+        calls=(),
+        health_answered=False,
+        both_alive=None,
+    )
+
+    assert variant_passed(base) is True
+    assert variant_passed(ex) is True
+
+    for term in ("outcome_match", "exit_class_match", "install_values_ok"):
+        assert variant_passed(replace(base, **{term: False})) is False, term
+
+    assert variant_passed(replace(ex, bind_match=None)) is True
+    assert variant_passed(replace(ex, bind_match=False)) is False
+    assert variant_passed(replace(ex, bind_match=True)) is True
+
+    # The running unit decides; a prediction that disagrees is reported apart.
+    assert variant_passed(replace(base, prediction_fault=True, predicted="exited")) is True
+
+    assert variant_passed(replace(base, both_alive=False)) is False
+    assert variant_passed(replace(base, health_answered=False)) is False
+    body_off = (CallVerdict(0, True, True), CallVerdict(1, True, False))
+    status_off = (CallVerdict(0, True, True), CallVerdict(1, False, True))
+    assert variant_passed(replace(base, calls=body_off)) is False
+    assert variant_passed(replace(base, calls=status_off)) is False
+
+    # health_answered and both_alive apply only where both listen.
+    assert variant_passed(replace(ex, health_answered=False, both_alive=None)) is True
+
+    hung = replace(
+        ex,
+        running_outcome="hung",
+        rebuilt_outcome="hung",
+        running_exit_class="zero",
+        rebuilt_exit_class="zero",
+        outcome_match=False,
+    )
+    assert variant_passed(hung) is False
+
+    assert exit_class(None) is None
+    assert exit_class(0) == "zero"
+    assert exit_class(3) == "nonzero"
+    assert exit_class(-9) == "nonzero"
+    assert exit_class(1) == exit_class(3)
