@@ -8,6 +8,7 @@ against the rebuilt unit, this repository.
 import json
 import os
 import socket
+import sys
 import time
 from pathlib import Path
 
@@ -128,7 +129,9 @@ _FAKE_PREAMBLE = """\
 import json, os, sys, time
 with open({dump!r}, 'w') as f:
     f.write(json.dumps({{'env': dict(os.environ), 'isolated': sys.flags.isolated,
-                        'path0': sys.path[0], 'cwd': os.getcwd()}}))
+                        'no_user_site': sys.flags.no_user_site,
+                        'hash_randomization': sys.flags.hash_randomization,
+                        'flags': sys.orig_argv[1:3], 'path0': sys.path[0], 'cwd': os.getcwd()}}))
 """
 
 _FAKE_BODIES = {
@@ -152,7 +155,33 @@ HTTPServer(('127.0.0.1', int(os.environ['MU_SPEC_PORT'])), Handler).serve_foreve
 }
 
 
-def test_runner_outcomes(tmp_path):
+def _fake_install(root, main):
+    """A fake install root holding an empty mu_spec/__init__.py and the given mu_spec/__main__.py."""
+    (root / "mu_spec").mkdir(parents=True)
+    (root / "mu_spec" / "__init__.py").write_text("")
+    (root / "mu_spec" / "__main__.py").write_text(main)
+    return root
+
+
+def _pristine(tmp_path):
+    """Small pristine store and prompts folders, and an empty check root."""
+    ps = tmp_path / "ps"
+    (ps / "projects" / "a").mkdir(parents=True)
+    (ps / "projects" / "a" / "x.json").write_bytes(b"{}")
+    pp = tmp_path / "pp"
+    pp.mkdir()
+    (pp / "default.md").write_bytes(b"d")
+    root = tmp_path / "check"
+    root.mkdir()
+    return str(root), str(ps), str(pp)
+
+
+def _env_of(env):
+    """A started program's environment less Windows' per-drive '=' names."""
+    return {k: v for k, v in env.items() if not k.startswith("=")}
+
+
+def test_runner_outcomes(tmp_path, monkeypatch):
     from startcheck.runner import (
         START_ALLOWANCE_S,
         RunnerError,
@@ -160,44 +189,45 @@ def test_runner_outcomes(tmp_path):
         alive,
         restore,
         start,
+        start_env,
         stop,
     )
 
     dump = tmp_path / "dump.json"
-    fakes = {}
-    for name, body in _FAKE_BODIES.items():
-        pkg = tmp_path / "fakes" / name / "mu_spec"
-        pkg.mkdir(parents=True)
-        (pkg / "__init__.py").write_text("")
-        (pkg / "__main__.py").write_text(_FAKE_PREAMBLE.format(dump=str(dump)) + body)
-        fakes[name] = str(pkg.parent)
+    fakes = {
+        name: _fake_install(tmp_path / "fakes" / name, _FAKE_PREAMBLE.format(dump=str(dump)) + body)
+        for name, body in _FAKE_BODIES.items()
+    }
+    root, ps, pp = _pristine(tmp_path)
+    monkeypatch.setenv("X_STRAY", "1")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    own = os.environ
 
-    ps = tmp_path / "ps"
-    (ps / "projects" / "a").mkdir(parents=True)
-    (ps / "projects" / "a" / "x.json").write_bytes(b"{}")
-    pp = tmp_path / "pp"
-    pp.mkdir()
-    (pp / "default.md").write_bytes(b"d")
-    root = str(tmp_path / "check")
-    os.mkdir(root)
-
-    from startcheck.variants import environment
+    def cmd(r):
+        return UnitCommand("rebuilt", str(r))
 
     def launch(name, variant):
-        restore(root, str(ps), str(pp))
-        return start(UnitCommand("rebuilt", fakes[name]), variant, root, os.environ)
+        restore(root, ps, pp)
+        return start(cmd(fakes[name]), variant, root, own)
 
     s = launch("serve", "hhhhhh")
     try:
         assert s.outcome == "listening"
         assert s.port == 19406
         assert s.exit_code is None
+        assert s.prepared is None
         assert alive(s)
-        seen = json.loads(dump.read_text())
-        assert seen["env"] == environment("hhhhhh", root, os.environ)
-        assert seen["isolated"] == 1
-        assert seen["path0"] == fakes["serve"]
-        assert seen["cwd"] == os.path.join(root, "work")
+        d = json.loads(dump.read_text())
+        expected = start_env(cmd(fakes["serve"]), "hhhhhh", root, own)
+        assert expected["PYTHONHASHSEED"] == "0"
+        assert "X_STRAY" not in expected and "PYTHONPATH" not in expected
+        assert _env_of(d["env"]) == expected
+        assert d["isolated"] == 0
+        assert d["no_user_site"] == 1
+        assert d["hash_randomization"] == 0
+        assert d["flags"] == ["-s", "-c"]
+        assert d["path0"] == str(fakes["serve"])
+        assert d["cwd"] == os.path.join(root, "work")
     finally:
         stop(s)
     assert _refused(19406)
@@ -228,10 +258,88 @@ def test_runner_outcomes(tmp_path):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", taken))
             listener.listen()
-            restore(root, str(ps), str(pp))
+            restore(root, ps, pp)
             with pytest.raises(RunnerError, match=str(taken)):
-                start(UnitCommand("rebuilt", fakes["serve"]), "hhhhhh", root, os.environ)
+                start(cmd(fakes["serve"]), "hhhhhh", root, own)
         assert not dump.exists(), taken
+
+
+# Writes its hash of 'mu-spec', the interpreter's flags and its environment's names, then exits 3.
+_HASH_FAKE = """\
+import json, os, sys
+sys.stdout.write(json.dumps({'hash': repr(hash('mu-spec')), 'hr': sys.flags.hash_randomization,
+                             'iso': sys.flags.isolated,
+                             'names': sorted(n for n in os.environ if not n.startswith('='))}))
+sys.exit(3)
+"""
+
+
+def test_runner_hash_seed(tmp_path):
+    from startcheck.runner import (
+        BOOTSTRAP,
+        RunnerError,
+        UnitCommand,
+        effective_seed,
+        interpreter_flags,
+        restore,
+        seed_env,
+        start,
+        start_env,
+        unit_argv,
+    )
+    from startcheck.variants import environment
+
+    for c in (UnitCommand("rebuilt", "R"), UnitCommand("rebuilt", "R", 12345)):
+        assert unit_argv(c) == (sys.executable, "-s", "-c", BOOTSTRAP, "R"), c
+        assert interpreter_flags(c) == ("-s",), c
+
+    assert effective_seed(UnitCommand("u", "R")) == 0
+    assert effective_seed(UnitCommand("u", "R", 7)) == 7
+    assert seed_env(UnitCommand("u", "R")) == {"PYTHONHASHSEED": "0"}
+    assert seed_env(UnitCommand("u", "R", 7)) == {"PYTHONHASHSEED": "7"}
+
+    h = _fake_install(tmp_path / "h", _HASH_FAKE)
+    root, ps, pp = _pristine(tmp_path)
+    own = dict(os.environ, PYTHONPATH="x", PYTHONHOME="y")
+
+    variant_env = environment("hhhhhh", root, own)
+    assert start_env(UnitCommand("u", "R"), "hhhhhh", root, own) == variant_env | {
+        "PYTHONHASHSEED": "0"
+    }
+    assert start_env(UnitCommand("u", "R", 7), "hhhhhh", root, own) == variant_env | {
+        "PYTHONHASHSEED": "7"
+    }
+
+    def out(seed):
+        restore(root, ps, pp)
+        s = start(UnitCommand("rebuilt", str(h), seed), "hhhhhh", root, own)
+        assert (s.outcome, s.exit_code) == ("exited", 3), (seed, s)
+        return json.loads(s.stdout)
+
+    a, b = out(None), out(None)
+    assert a == b
+    assert a["hr"] == 0
+    assert a["iso"] == 0
+    assert "PYTHONHASHSEED" in a["names"]
+    assert "PYTHONPATH" not in a["names"] and "PYTHONHOME" not in a["names"]
+
+    assert out(12345) == out(12345)
+    assert out(54321)["hash"] != out(12345)["hash"]
+
+    out(4294967295)
+    out(0)
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 9006))
+        listener.listen()
+        for bad in (-1, 4294967296, True, "5"):
+            restore(root, ps, pp)
+            with pytest.raises(ValueError) as caught:
+                start(UnitCommand("rebuilt", str(h), bad), "hhhhhh", root, own)
+            assert not isinstance(caught.value, RunnerError), bad
+        restore(root, ps, pp)
+        with pytest.raises(RunnerError, match="9006"):
+            start(UnitCommand("rebuilt", str(h), 5), "hhhhhh", root, own)
 
 
 def test_restore_and_reach_port(tmp_path):
@@ -261,7 +369,7 @@ def test_restore_and_reach_port(tmp_path):
     assert (root / "work").is_dir()
     assert list((root / "work").iterdir()) == []
     assert _files(root / "store") == {"projects/a/x.json": b"{}"}
-    assert set(_files(root / "prompts")) == {"default.md"}
+    assert _files(root / "prompts") == {"default.md": b"d"}
     assert (root / "notes.txt").read_bytes() == b"not a directory\n"
     assert not (root / "nope").exists()
     assert _files(ps) == ps_before
@@ -273,6 +381,142 @@ def test_restore_and_reach_port(tmp_path):
     assert reach_port("hhxhhh") is None
     assert reach_port("hhhhhhx") == 19406
     assert reach_port("xhhhhhe") == 19406
+
+
+# Scratch programs a fixture Launcher runs as `-c` text; each writes its environment's pairs to {dump}.
+_PROG_DUMP = """\
+import json, os, sys
+def dump_env():
+    with open({dump!r}, 'w') as f:
+        f.write(json.dumps(sorted((k, v) for k, v in os.environ.items() if not k.startswith('='))))
+"""
+
+_PROG_SERVE = """\
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == '/health' else 404)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+server = HTTPServer(('127.0.0.1', int(os.environ['MU_SPEC_PORT'])), Handler)
+dump_env()
+server.serve_forever()
+"""
+
+
+class Rec:
+    """A fixture Launcher: records each prepare, each ready argument and each done call."""
+
+    def __init__(self, prog, extra=None, argv=None, ready=lambda left: True):
+        self.prog = prog
+        self.extra = {"X_CHECK": "1"} if extra is None else extra
+        self.argv = argv
+        self._ready = ready
+        self.prepares = []
+        self.returned = []
+        self.ready_args = []
+        self.done_calls = 0
+
+    def prepare(self, cmd, check_root):
+        from startcheck.runner import Prepared
+
+        self.prepares.append((cmd, check_root))
+
+        def ready(left):
+            self.ready_args.append(left)
+            return self._ready(left)
+
+        def done():
+            self.done_calls += 1
+
+        argv = self.argv or (sys.executable, "-s", "-c", self.prog)
+        prepared = Prepared(argv=argv, extra_env=self.extra, ready=ready, done=done)
+        self.returned.append(prepared)
+        return prepared
+
+
+def test_runner_launcher(tmp_path):
+    from startcheck.runner import (
+        RunnerError,
+        UnitCommand,
+        restore,
+        start,
+        start_env,
+        stop,
+    )
+
+    dump = tmp_path / "dump.json"
+    head = _PROG_DUMP.format(dump=str(dump))
+    p_fail = head + "dump_env()\nsys.exit(3)\n"
+    p_zero = head + "dump_env()\nsys.exit(0)\n"
+    p_serve = head + _PROG_SERVE
+    root, ps, pp = _pristine(tmp_path)
+    cmd = UnitCommand("rebuilt", str(tmp_path / "unused"))
+    own = os.environ
+
+    def launch(rec):
+        dump.unlink(missing_ok=True)
+        restore(root, ps, pp)
+        return start(cmd, "hhhhhh", root, own, rec)
+
+    rec = Rec(p_fail)
+    s = launch(rec)
+    assert (s.outcome, s.exit_code) == ("exited", 3), s
+    assert len(rec.prepares) == 1
+    assert len(rec.ready_args) == 1 and 0 < rec.ready_args[0] <= 15.0, rec.ready_args
+    assert rec.done_calls == 1
+    assert s.prepared is rec.returned[0]
+    expected = sorted((start_env(cmd, "hhhhhh", root, own) | {"X_CHECK": "1"}).items())
+    assert json.loads(dump.read_text()) == [list(pair) for pair in expected]
+
+    rec = Rec(p_zero)
+    s = launch(rec)
+    assert (s.outcome, s.exit_code) == ("hung", 0), s
+    assert rec.done_calls == 1
+
+    rec = Rec(p_serve)
+    s = launch(rec)
+    try:
+        assert s.outcome == "listening", s
+        assert rec.done_calls == 0
+    finally:
+        stop(s)
+    assert rec.done_calls == 1
+
+    refused = [
+        Rec(p_fail, extra={"MU_SPEC_PORT": "1"}),
+        Rec(p_fail, extra={"PYTHONHASHSEED": "1"}),
+        Rec(p_fail, extra={"PYTHONPATH": "x"}),
+        Rec(p_fail, extra={"pythonstartup": "x"}),
+        Rec(p_fail, argv=(sys.executable, "-I", "-c", p_fail)),
+        Rec(p_fail, argv=(sys.executable, "-s", "-E", "-c", p_fail)),
+        Rec(p_fail, argv=(sys.executable, "-c", p_fail)),
+    ]
+    for rec in refused:
+        with pytest.raises(RunnerError):
+            launch(rec)
+        assert len(rec.prepares) == 1, (rec.extra, rec.argv)
+        assert not dump.exists(), (rec.extra, rec.argv)
+
+    def wait_then_refuse(left):
+        deadline = time.monotonic() + left
+        while not dump.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return False
+
+    rec = Rec(p_serve, ready=wait_then_refuse)
+    with pytest.raises(RunnerError, match="rebuilt"):
+        launch(rec)
+    deadline = time.monotonic() + 5
+    while not _refused(19406):
+        assert time.monotonic() < deadline, "19406 still answers after a failed ready"
+        time.sleep(0.1)
+    assert len(rec.prepares) == 1
 
 
 BIND_SAMPLES = [
