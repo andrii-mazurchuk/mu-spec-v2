@@ -109,9 +109,9 @@ def test_list_tools_and_dashboard_separation():
 
     # 4. no dashboard path or name reaches find_tool, TOOLS or discovery
     assert (SCREEN_METHOD, SCREEN_PATH) == ("POST", "/dash/screen")
-    assert PROGRESS_PATH == "/dash/progress"
-    assert find_tool(SCREEN_METHOD, SCREEN_PATH) is None
-    assert find_tool(PROGRESS_METHOD, PROGRESS_PATH) is None
+    assert (PROGRESS_METHOD, PROGRESS_PATH) == ("POST", "/dash/progress")
+    assert find_tool("POST", "/dash/screen") is None
+    assert find_tool("POST", "/dash/progress") is None
     for spec in ACTIONS:
         assert find_tool(spec.method, filled(spec.path)) is None, spec.name
     tool_names = {d.schema.name for d in TOOLS}
