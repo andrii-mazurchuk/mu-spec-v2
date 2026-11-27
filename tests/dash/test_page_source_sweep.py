@@ -100,20 +100,18 @@ def sweep(root: Path, consts: dict, strip_render: bool = True, strip_block: bool
     return hits
 
 
-def key_names(key) -> tuple[str, ...]:
-    """The text parts of one palette_values key: the key itself, or each member of a tuple key."""
-    return tuple(str(k) for k in key) if isinstance(key, tuple) else (str(key),)
-
-
 def block(root: Path, consts: dict) -> tuple[list[str], int, int, object]:
-    """(faults, fallback key count, slice key count, extra) of the template's palette block."""
+    """(faults, fallback key count, slice key count, extra) of the template's palette block.
+
+    palette_values keys are S-434 DeclKeys: ("fallback", PALETTE token, side) or ("slice", slice var, None).
+    """
     from dashcheck.browser import palette_values
 
     values, extra = palette_values((root / TEMPLATE).read_text(encoding="utf-8"))
+    palette = set(consts["PALETTE"])
     slices = {*consts["SLICE_VARS"], consts["NO_SLICE_VAR"]}
-    keys = [key_names(k) for k in values]
-    fallbacks = sum(1 for names in keys if any(consts["FALLBACK_PREFIX"] in n for n in names))
-    slice_keys = sum(1 for names in keys if any(n in slices for n in names))
+    fallbacks = sum(1 for kind, name, _ in values if kind == "fallback" and name in palette)
+    slice_keys = sum(1 for kind, name, _ in values if kind == "slice" and name in slices)
     faults = []
     if fallbacks != DECLARED_FALLBACKS:
         faults.append(f"{fallbacks} fallback keys")
