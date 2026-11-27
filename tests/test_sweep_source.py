@@ -1,11 +1,12 @@
-"""The source sweep's rules, one fixture per listed name (T-65).
+"""The source sweep's rules, one fixture per listed name (T-65), and its worker form, Ship reads,
+labels and no-import guarantee (T-377).
 
 The sweep under test is sweeps.source.sweep (S-401); it is never re-implemented here. Each case
 copies the repository's mu_spec package into tmp_path, writes one fixture module into the copy and
-runs the sweep on tmp_path, the directory holding the copied package. The lists below are copied
-from the specification as literals, so a sweep whose own list forgets a member fails that member's
-case. Modules under test are imported inside the test, so a module not yet written fails only the
-tests that need it.
+runs the sweep on tmp_path, the directory holding the copied package. T-65's lists are copied from
+the specification as literals, so a sweep whose own list forgets a member fails that member's case;
+T-377 reads RULE_LABELS from sweeps.source. Modules under test are imported inside the test, so a
+module not yet written fails only the tests that need it.
 """
 
 import shutil
@@ -191,3 +192,104 @@ def test_sweep_rules_per_name(tmp_path, module, source, label):
         assert result == []
     else:
         assert Failure(label, module) in result, result
+
+
+WORKER = "mu_spec.dash.worker"
+WP = (
+    "import multiprocessing\n"
+    "def run():\n"
+    "    pass\n"
+    "ctx = multiprocessing.get_context('spawn')\n"
+    "ctx.Process(target=run, daemon=True)"
+)
+WP_HEAD = WP.rsplit("\n", 1)[0]
+WORKER_FAILS = {
+    "WF1": "import multiprocessing as mp\ndef run(): pass\nctx = mp.get_context('spawn')\nctx.Process(target=run)",
+    "WF2": "from multiprocessing import Process\ndef run(): pass\nProcess(target=run)",
+    "WF3": WP.replace("'spawn'", "'fork'"),
+    "WF4": WP.replace("multiprocessing.get_context('spawn')", "multiprocessing.get_context()"),
+    "WF5": "import multiprocessing\ndef run(): pass\nmultiprocessing.Process(target=run)",
+    "WF6": WP_HEAD + "\nctx.Process(None, run)",
+    "WF7": WP_HEAD + "\nctx.Process(target=lambda: None)",
+    "WF8": WP_HEAD + "\nctx.Process(target=obj.run)",
+    "WF9": WP + "\nimport subprocess",
+}
+RS = (
+    "class SnapshotShip:\n"
+    "    def __init__(self, snap):\n"
+    "        self.snap = snap\n"
+    "class Source:\n"
+    "    def __init__(self, snap):\n"
+    "        self.ship = SnapshotShip(snap)"
+)
+RS2 = RS + "\ndef marker(rt):\n    return rt.ship.marker"
+AM = "def marker(runtime):\n    return runtime.ship.marker"
+NI = "open({FLAG_TEXT}, 'w').close()\nraise RuntimeError('imported')"
+
+
+def worker_cases() -> list:
+    """(module, fixture, expectation): 'clean' is [], 'form' a worker failure, else (rule, subject)."""
+    readsource, assemble, dispatch = "mu_spec.dash.readsource", "mu_spec.dash.assemble", "mu_spec.dash.dispatch"
+    out = [pytest.param(WORKER, WP, "clean", id="WP-worker")]
+    out += [pytest.param(WORKER, text, "form", id=f"{name}-worker") for name, text in WORKER_FAILS.items()]
+    out += [pytest.param(m, WP, ("forbidden", m), id=f"WP-{m}") for m in (assemble, FX)]
+    out += [
+        pytest.param(readsource, RS, "clean", id="RS-readsource"),
+        pytest.param(readsource, RS2, ("only-in:github", readsource), id="RS2-readsource"),
+        pytest.param(assemble, AM, "clean", id="AM-assemble"),
+        pytest.param(dispatch, AM, ("only-in:github", dispatch), id="AM-dispatch"),
+        pytest.param("mu_spec.store", NI, "no-import", id="NI-store"),
+    ]
+    return out
+
+
+def append(root: Path, module: str, source: str) -> None:
+    """Append source after a newline to the copy's file for module, or write it as a new file."""
+    parts = module.split(".")
+    directory = root.joinpath(*parts)
+    path = directory / "__init__.py" if directory.is_dir() else root.joinpath(*parts[:-1], parts[-1] + ".py")
+    if path.is_file():
+        text = path.read_text(encoding="utf-8") + "\n" + source + "\n"
+    else:
+        package = root / parts[0]
+        for part in parts[1:-1]:
+            package = package / part
+            if not package.is_dir():
+                package.mkdir()
+                (package / "__init__.py").write_text("", encoding="utf-8")
+        text = source + "\n"
+    path.write_text(text, encoding="utf-8", newline="")
+
+
+@pytest.mark.parametrize(("module", "source", "expect"), worker_cases())
+def test_worker_form_ship_reads_labels_and_no_import(tmp_path, module, source, expect):
+    import sys
+
+    from sweeps.source import RULE_LABELS, Failure, sweep
+
+    assert len(RULE_LABELS) == 17 and len(set(RULE_LABELS)) == 17, RULE_LABELS
+    assert MU_SPEC.is_dir(), "mu_spec is absent"
+    copy = tmp_path / "mu_spec"
+    shutil.copytree(MU_SPEC, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    assert sweep(tmp_path) == []
+
+    flag = tmp_path / "imported.flag"
+    if expect == "no-import":
+        source = source.replace("{FLAG_TEXT}", repr(str(flag)))
+    append(tmp_path, module, source)
+    failures = sweep(tmp_path)
+
+    assert [f for f in failures if f.rule not in RULE_LABELS] == [], failures
+    if expect in ("clean", "no-import"):
+        assert failures == []
+    elif expect == "form":
+        assert any(f.subject == WORKER and f.rule in ("process-form", "forbidden") for f in failures), failures
+    else:
+        assert Failure(*expect) in failures, failures
+    if expect == "no-import":
+        assert not flag.exists()
+        under = [
+            name for name, mod in list(sys.modules.items())
+            if getattr(mod, "__file__", None) and Path(mod.__file__).resolve().is_relative_to(copy.resolve())
+        ]
+        assert under == []
