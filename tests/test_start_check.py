@@ -11,6 +11,7 @@ import os
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -132,7 +133,8 @@ def _refused(port):
 _FAKE_PREAMBLE = """\
 import json, os, sys, time
 with open({dump!r}, 'w') as f:
-    f.write(json.dumps({{'env': dict(os.environ), 'isolated': sys.flags.isolated,
+    f.write(json.dumps({{'name': __name__, 'env': dict(os.environ),
+                        'isolated': sys.flags.isolated,
                         'no_user_site': sys.flags.no_user_site,
                         'hash_randomization': sys.flags.hash_randomization,
                         'flags': sys.orig_argv[1:3], 'path0': sys.path[0], 'cwd': os.getcwd()}}))
@@ -159,11 +161,17 @@ HTTPServer(('127.0.0.1', int(os.environ['MU_SPEC_PORT'])), Handler).serve_foreve
 }
 
 
-def _fake_install(root, main):
-    """A fake install root holding an empty mu_spec/__init__.py and the given mu_spec/__main__.py."""
+def _fake_install(root, program=None, package_main=None):
+    """A fake install root: mu_spec/__init__.py (empty), and a mu_spec/main.py running program
+    under `if __name__ == '__main__':`. A mu_spec/__main__.py exists only when package_main is given.
+    """
     (root / "mu_spec").mkdir(parents=True)
     (root / "mu_spec" / "__init__.py").write_text("")
-    (root / "mu_spec" / "__main__.py").write_text(main)
+    if program is not None:
+        main = "if __name__ == '__main__':\n" + textwrap.indent(program, "    ")
+        (root / "mu_spec" / "main.py").write_text(main)
+    if package_main is not None:
+        (root / "mu_spec" / "__main__.py").write_text(package_main)
     return root
 
 
@@ -187,6 +195,9 @@ def _env_of(env):
 
 def test_runner_outcomes(tmp_path, monkeypatch):
     from startcheck.runner import (
+        BOOTSTRAP,
+        ENTRY_FILE,
+        ENTRY_MODULE,
         START_ALLOWANCE_S,
         RunnerError,
         UnitCommand,
@@ -197,11 +208,19 @@ def test_runner_outcomes(tmp_path, monkeypatch):
         stop,
     )
 
+    assert ENTRY_MODULE == "mu_spec.main"
+    assert ENTRY_FILE == ("mu_spec", "main.py")
+    assert "run_module('mu_spec.main', run_name='__main__', alter_sys=True)" in BOOTSTRAP
+    assert "run_module('mu_spec'," not in BOOTSTRAP
+
     dump = tmp_path / "dump.json"
     fakes = {
         name: _fake_install(tmp_path / "fakes" / name, _FAKE_PREAMBLE.format(dump=str(dump)) + body)
         for name, body in _FAKE_BODIES.items()
     }
+    fakes["pkgonly"] = _fake_install(
+        tmp_path / "fakes" / "pkgonly", package_main="import sys; sys.exit(3)\n"
+    )
     root, ps, pp = _pristine(tmp_path)
     monkeypatch.setenv("X_STRAY", "1")
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
@@ -222,8 +241,11 @@ def test_runner_outcomes(tmp_path, monkeypatch):
         assert s.prepared is None
         assert alive(s)
         d = json.loads(dump.read_text())
+        assert d["name"] == "__main__"
         expected = start_env(cmd(fakes["serve"]), "hhhhhh", root, own)
         assert expected["PYTHONHASHSEED"] == "0"
+        if sys.platform == "win32":
+            assert expected["SYSTEMROOT"] == os.environ["SYSTEMROOT"]
         assert "X_STRAY" not in expected and "PYTHONPATH" not in expected
         assert _env_of(d["env"]) == expected
         assert d["isolated"] == 0
@@ -247,6 +269,13 @@ def test_runner_outcomes(tmp_path, monkeypatch):
     assert s.exit_code == 0
     assert s.stdout == b"bye\n"
 
+    dump.unlink(missing_ok=True)
+    s = launch("pkgonly", "hhhhhh")
+    assert s.outcome == "exited"
+    assert s.exit_code is not None and s.exit_code != 3, s.exit_code
+    assert b"mu_spec.main" in s.stderr, s.stderr
+    assert not dump.exists()
+
     assert START_ALLOWANCE_S == 15.0
     began = time.monotonic()
     s = launch("sleep", "hhehhh")
@@ -268,7 +297,8 @@ def test_runner_outcomes(tmp_path, monkeypatch):
         assert not dump.exists(), taken
 
 
-# Writes its hash of 'mu-spec', the interpreter's flags and its environment's names, then exits 3.
+# A main.py program: writes its hash of 'mu-spec', the interpreter's flags and its environment's
+# names, then exits 3.
 _HASH_FAKE = """\
 import json, os, sys
 sys.stdout.write(json.dumps({'hash': repr(hash('mu-spec')), 'hr': sys.flags.hash_randomization,
