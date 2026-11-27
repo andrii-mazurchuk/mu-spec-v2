@@ -33,6 +33,7 @@ CALL_TIMEOUT_S = 120.0
 SEED_NOTE = "effects fixture"
 SEED_ACTOR = "effects-recorder"
 REJECT_NOTE = "n"
+CUT_BODY = {"note": ""}  # the cut as today's page sends it
 
 
 def from_env(name: str, what: str) -> str:
@@ -52,10 +53,12 @@ def decode(raw: bytes) -> object:
 class Unit:
     """One started running unit: its tool and action routes, and calls to it."""
 
-    def __init__(self, host: str, port: int, bundle: dict) -> None:
+    def __init__(self, host: str, port: int, bundle: dict, routes: "Unit | None" = None) -> None:
+        """routes: a unit of the same install already started, whose discovery is reused, so the
+        first call this one is sent is the recorder's own."""
         self.host, self.port, self.bundle = host, port, bundle
-        self.tools = self.listing("/tools", "tools")
-        self.actions = self.listing("/actions", "actions")
+        self.tools = routes.tools if routes else self.listing("/tools", "tools")
+        self.actions = routes.actions if routes else self.listing("/actions", "actions")
 
     def send(self, method: str, path: str, body: object = None) -> tuple[int, object]:
         conn = http.client.HTTPConnection(self.host, self.port, timeout=CALL_TIMEOUT_S)
@@ -78,7 +81,7 @@ class Unit:
         query of a GET or the JSON body of any other method."""
         assert name in self.tools, f"the running unit's discovery lists no tool {name!r}"
         spec = self.tools[name]
-        method, route = str(spec["method"]).upper(), spec["path"]
+        method, route = str(spec["method"]).upper(), "/" + str(spec["path"]).lstrip("/")
         rest = dict(args)
         for param in [p.split("}")[0] for p in route.split("{")[1:]]:
             route = route.replace("{" + param + "}", urllib.parse.quote(str(rest.pop(param)), safe=""))
@@ -167,12 +170,14 @@ def test_record_effect_fixtures(tmp_path):
 
     session = open_session(own_env)
 
+    routes = None
+
     @contextlib.contextmanager
     def fresh_copy():
         restore(str(root), str(pristine_store), str(pristine_prompts))
         it = launch(cmd, str(root), own_env, session.standin, session.neighbour)
         try:
-            yield Unit(REACH_HOST, it.started.port, BUNDLE)
+            yield Unit(REACH_HOST, it.started.port, BUNDLE, routes)
         finally:
             stop(it.started)
 
@@ -180,13 +185,14 @@ def test_record_effect_fixtures(tmp_path):
         # P: the first project whose spine shows a slice and whose cut makes C non-empty
         project = None
         with fresh_copy() as unit:
+            routes = unit
             listed = unit.tool("list_projects", {})
             assert listed[0] == 200 and isinstance(listed[1], dict), f"list_projects answered {listed!r}"
             for name in sorted(listed[1].get("projects") or ()):
                 if not slicing(unit.read("spine", name)):
                     continue
                 before, emission = unit.read("units", name), unit.read("emission", name)
-                status, _ = unit.act("cut_units", name, {})
+                status, _ = unit.act("cut_units", name, CUT_BODY)
                 if 200 <= status < 300 and new_cut(before, emission, unit.read("units", name)):
                     project = name
                     break
@@ -198,7 +204,7 @@ def test_record_effect_fixtures(tmp_path):
             spine_before = unit.read("spine", project)
             units_before = unit.read("units", project)
             emission_before = unit.read("emission", project)
-            pressed(unit, "cut_units", project, {})
+            pressed(unit, "cut_units", project, CUT_BODY)
             units_cut = unit.read("units", project)
         assert new_cut(units_before, emission_before, units_cut), f"C is empty for {project!r}"
         mapping = slicing(spine_before)
