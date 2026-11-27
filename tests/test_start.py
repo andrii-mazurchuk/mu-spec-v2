@@ -1,9 +1,9 @@
 """The start sequence, mu_spec.start.main: configure, the startup line, range, assemble, bind, serve.
 
 Over a fake Composition each step's failure is one stderr line and status 1 with nothing after it,
-and the root text is copied into the startup line unchanged (T-285). As a process, empty values and
-a spaced port listen, and a state directory that is a file is refused before the startup line
-(T-284); every expected root text there comes from the outside entry's loader, never spelled here.
+and the root text is copied into the startup line unchanged (T-285). As a process started as
+`python -s -m mu_spec.main`, empty values and a spaced port listen, and a state directory that is
+a file is refused before the startup line (T-483); every expected root text there comes from the outside entry's loader, never spelled here.
 Modules under test are imported inside the test, so a module not yet written fails only the tests
 that need it.
 """
@@ -192,11 +192,12 @@ def test_start_as_process(tmp_path):
     base = _base_env()
 
     def rt(env):
-        return load_config(env, work)[0].root_text
+        return load_config(env, str(work))[0].root_text
 
     def start(env):
+        # started as the unit is started; the package alone has no __main__ module
         return subprocess.Popen(
-            [sys.executable, "-m", "mu_spec"], cwd=work, env=env,
+            [sys.executable, "-s", "-m", "mu_spec.main"], cwd=work, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     # 1. empty values and a spaced port listen, the startup line copying the loader's root text
