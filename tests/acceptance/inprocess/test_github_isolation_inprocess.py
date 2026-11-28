@@ -67,6 +67,28 @@ def records(root: Path) -> dict[str, bytes]:
     }
 
 
+def changed_records(before: dict[str, bytes], after: dict[str, bytes], forks: list[str]) -> list[str]:
+    """The records the test changed beyond what writing on the forks may change.
+
+    A project's own records must be byte for byte unchanged. A file at the store root is shared by
+    every project (the inbox, the lifecycle log): its earlier bytes must be an unchanged prefix, and
+    every line appended after them must name a fork, since post_request, fork_project and the writes
+    on F append there."""
+    names = [f.encode("utf-8") for f in forks]
+    changed = []
+    for key in sorted(set(before) | set(after)):
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        if "/" in key or new is None or not new.startswith(old or b""):
+            changed.append(key)
+            continue
+        added = [line for line in new[len(old or b""):].splitlines() if line.strip()]
+        if not all(any(n in line for n in names) for line in added):
+            changed.append(key)
+    return changed
+
+
 class FakeGitHub:
     """A GitHubClient stand-in: records every request and answers 200 with an empty list."""
 
@@ -195,7 +217,7 @@ def test_non_ship_tools_never_call_github(acceptance_inputs, tmp_path, monkeypat
     assert any(all(answered[p].get(name) == 200 for name in READS) for p in projects), \
         json.dumps({p: {n: answered[p].get(n) for n in READS} for p in projects})
 
-    # 3. every record under W other than the forks' is unchanged
-    after = records(W)
-    changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    # 3. every record under W other than the forks' is unchanged: the projects' own byte for byte,
+    # the shared root files but for appended lines naming a fork
+    changed = changed_records(before, records(W), [FORK_PREFIX + p for p in projects])
     assert changed == [], changed

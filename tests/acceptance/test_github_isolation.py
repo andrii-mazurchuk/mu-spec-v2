@@ -5,8 +5,9 @@ acceptance_inputs fixture; each unit is started alone by S-491's start through t
 (S-506's InterposedLauncher), on its own copy restored from the staged store, reached only through
 S-519's call, and stopped after its last call. The launch sends every GitHub destination to one
 stand-in address, which this test chooses: OK, the check's GitHub stand-in (S-499) answering for a
-readable repository and a known login; SILENT, a socket server that reads each request and never
-answers; DOWN, a port nothing listens on. The in-process half of the S-96 tests, over the stored
+readable repository and a known login; SILENT, a socket server that completes TLS with the
+stand-in's certificate, reads each HTTP request in full and never answers, so the unit's request is
+sent and times out; DOWN, a port nothing listens on. The in-process half of the S-96 tests, over the stored
 copy, is tests/acceptance/inprocess/test_github_isolation_inprocess.py. Modules under test are
 imported inside the test, so a module not yet written fails only the tests that need it.
 """
@@ -15,6 +16,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import threading
 
 START_VARIANT = "hhhhhh"  # every value healthy, reached on HEALTHY_PORT
@@ -52,9 +54,13 @@ def listing(raw: bytes) -> list:
 
 
 class Silent:
-    """SILENT: accepts, reads what each connection sends until it closes, records it, never answers."""
+    """SILENT: accepts over TLS with the check's GitHub certificate, reads each HTTP request in full
+    (its headers up to the blank line, then Content-Length bytes of body), records it and never
+    answers, the connection left open until the unit gives up."""
 
-    def __init__(self) -> None:
+    def __init__(self, cert: str, key: str) -> None:
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.context.load_cert_chain(cert, key)
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.bind((REACH_HOST, 0))
         self.listener.listen(16)
@@ -72,16 +78,30 @@ class Silent:
             self.conns.append(conn)
             threading.Thread(target=self._read, args=(conn,), daemon=True).start()
 
-    def _read(self, conn: socket.socket) -> None:
+    def _read(self, raw: socket.socket) -> None:
+        try:
+            conn = self.context.wrap_socket(raw, server_side=True)
+        except (OSError, ssl.SSLError):
+            return
+        self.conns.append(conn)
         data = b""
         try:
             while True:
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                if not data:
-                    self.requests.append(chunk)
-                data += chunk
+                while b"\r\n\r\n" not in data:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                head, _, data = data.partition(b"\r\n\r\n")
+                length = re.search(rb"(?im)^content-length:\s*(\d+)\s*$", head)
+                size = int(length.group(1)) if length else 0
+                while len(data) < size:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                self.requests.append(head + b"\r\n\r\n" + data[:size])
+                data = data[size:]
         except OSError:
             pass
 
@@ -147,7 +167,7 @@ def test_unreachable_wording_matches_running_unit(request, tmp_path):
 
     inputs = request.getfixturevalue("acceptance_inputs")
 
-    from shipcheck.standin import Script
+    from shipcheck.standin import CERT_FIXTURE, KEY_FIXTURE, Script
     from unitcheck.launch import InterposedLauncher
     from unitcheck.session import open_session
 
@@ -162,7 +182,7 @@ def test_unreachable_wording_matches_running_unit(request, tmp_path):
         ENV_NAMES["github_token"], "")
 
     session = open_session(env)
-    silent, down = Silent(), Down()
+    silent, down = Silent(CERT_FIXTURE, KEY_FIXTURE), Down()
     answers: dict[tuple[str, str], tuple[int, bytes]] = {}
     reached: dict[str, int] = {}
     project = None
