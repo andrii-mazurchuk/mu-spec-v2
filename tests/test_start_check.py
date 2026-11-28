@@ -1,8 +1,8 @@
-"""The start check: its variant set, runner, restore, bind-line reading, judge and quick run.
+"""The start check: its variant set, runner, restore, bind-line reading, judge and acceptance inputs.
 
 Modules under test are imported inside each test, so a module not yet written fails only the
-tests that need it. The quick run judges the running unit, the install at MU_SPEC_REFERENCE_INSTALL,
-against the rebuilt unit, this repository.
+tests that need it. The quick run over the two real units lives with the acceptance tests, in
+tests/acceptance/test_start_check_quick.py.
 """
 
 import ast
@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 HEALTHY_SHA = "0123456789abcdef0123456789abcdef01234567"
-REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_VAR = "MU_SPEC_REFERENCE_INSTALL"
 
 
@@ -688,8 +687,9 @@ def test_malformed_host_has_no_colon_space(tmp_path):
         assert host == "not a host!", (check_root, host)
 
 
-# A fake install's unit: exits 1 on a present port that is empty or not an integer, else serves every
-# path on 127.0.0.1 (9006 when the port is missing). It first appends its install root to {starts}.
+# A fake install's mu_spec/main.py program: exits 1 on a present port that is empty or not an integer,
+# else serves every path on 127.0.0.1 (9006 when the port is missing). It first appends its install
+# root to {starts}.
 _JUDGE_FAKE = """\
 import json, os, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -750,13 +750,12 @@ ThreadingHTTPServer(('127.0.0.1', port), Handler).serve_forever()
 
 
 def _judge_fake(tmp_path, name, head, starts, wrong=False, cfg=False, stamp=False):
-    root = tmp_path / "fakes" / name
-    (root / "mu_spec").mkdir(parents=True)
+    """A fake install whose mu_spec/main.py runs _JUDGE_FAKE; it holds no mu_spec/__main__.py."""
+    program = _JUDGE_FAKE.format(wrong=wrong, cfg=cfg, stamp=stamp, starts=str(starts))
+    root = _fake_install(tmp_path / "fakes" / name, program)
     (root / ".git").mkdir()
     (root / ".git" / "HEAD").write_bytes(head.encode() + b"\n")
-    (root / "mu_spec" / "__init__.py").write_text("")
-    main = _JUDGE_FAKE.format(wrong=wrong, cfg=cfg, stamp=stamp, starts=str(starts))
-    (root / "mu_spec" / "__main__.py").write_text(main)
+    assert not (root / "mu_spec" / "__main__.py").exists()
     return root
 
 
@@ -856,46 +855,6 @@ def test_judge_masks_with_fakes(tmp_path):
     assert exited.bind_match is None, exited
     assert exited.calls == (), exited
     assert launcher.prepared == [str(A), str(B), str(A), str(B)]
-
-
-def test_quick_variants(tmp_path):
-    from startcheck.judge import run
-    from startcheck.runner import UnitCommand
-    from startcheck.variants import QUICK
-
-    reference = os.environ.get(REFERENCE_VAR)
-    if not reference:
-        pytest.fail(f"{REFERENCE_VAR} is not set: it must name the running unit's install root")
-    running = UnitCommand("running", reference)
-    rebuilt = UnitCommand("rebuilt", str(REPO_ROOT))
-    check_root = tmp_path / "check"
-    check_root.mkdir()
-    pristine_store = tmp_path / "pristine_store"
-    (pristine_store / "projects").mkdir(parents=True)
-    pristine_prompts = REPO_ROOT / "prompts"
-
-    try:
-        from unitcheck.session import open_session
-
-        session = open_session(os.environ)
-    except Exception as exc:  # noqa: BLE001 - any refusal to give a launcher fails the test
-        pytest.fail(f"no shared launcher can be given: open_session raised {exc!r}")
-    try:
-        launcher = session.launcher()
-        report = run(QUICK, running, rebuilt, str(check_root), str(pristine_store),
-                     str(pristine_prompts), os.environ, launcher=launcher)
-        controls = session.controls()
-    finally:
-        session.close()
-
-    failing = "\n".join(repr(v) for v in report.verdicts if not v.passed)
-    detail = f"prediction faults: {report.prediction_faults}\nfailing verdicts:\n{failing}"
-    assert len(report.verdicts) == 22, detail
-    assert report.missing == (), detail
-    assert report.healthy_listened is True, detail
-    assert report.passed is True, detail
-    # both units of each variant started through the launcher, one prepare per start
-    assert len(controls) == 44, detail
 
 
 def _complete_install(root):
