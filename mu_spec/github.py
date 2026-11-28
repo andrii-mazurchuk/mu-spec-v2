@@ -1,7 +1,7 @@
 """The unit's only outbound client: one HTTP request to GitHub per call, and its answer.
 
 GitHubClient sends exactly one request per request() call and returns whatever status came back,
-4xx and 5xx included, with the body decoded and the header names lower-cased. It never retries,
+3xx, 4xx and 5xx included (a redirect is returned, never followed), with the body decoded and the header names lower-cased. It never retries,
 never sleeps and never paces: that policy is the Ship part's sender's, which reads the answer's
 headers and, when no answer came, GitHubUnreachable.timed_out. build_runtime builds the one
 instance from Config.github_token and hands it to the Ship part alone.
@@ -66,6 +66,16 @@ def _headers(message: object) -> Mapping[str, str]:
     return types.MappingProxyType({name.lower(): value for name, value in items})
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows nothing: a 3xx is an answer with a status, raised as HTTPError and returned as such."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 class GitHubClient:
     """A token, or none, and one request at a time."""
 
@@ -89,7 +99,7 @@ class GitHubClient:
         request = urllib.request.Request(
             API_ROOT.rstrip("/") + "/" + path.lstrip("/"), data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
                 return GitHubResponse(response.status, _decode(response.read()), _headers(response.headers))
         except urllib.error.HTTPError as exc:
             # an answer with a status, returned as any other
