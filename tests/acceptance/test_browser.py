@@ -1,6 +1,6 @@
-"""The browser check passes on the rebuilt page over the acceptance copy (T-450).
+"""The browser check passes on the rebuilt page over the acceptance copy (T-492).
 
-The pytest wrapper of dashcheck.browser (S-434): it takes S-508's acceptance_inputs, builds the
+The pytest wrapper of dashcheck.browser (S-516): it takes S-519's acceptance_inputs, builds the
 shared interposed launch's Launcher as every check's wrapper does, runs run() and requires a pass,
 writing the timings table and the colour fault lines out as the report file. Outside
 tests/acceptance/inprocess: it launches units and imports no mu_spec module itself. Every start is
@@ -82,13 +82,16 @@ def normaliser(page):
 
 @pytest.fixture(scope="session")
 def acceptance_inputs(request):
-    """S-508's acceptance_inputs itself, set up only once the module under test imports.
+    """S-519's acceptance_inputs itself, set up only once the module under test imports.
 
     The conftest fixture is autouse, so without this it runs before the test body: while dashcheck is
-    absent the test would fail on a missing acceptance input instead of on the absent module.
+    absent the test would fail on a missing acceptance input instead of on the absent module. While it
+    is absent nothing is set up, and the test body's own import fails, in the test and not its setup.
     """
-    import dashcheck.browser  # noqa: F401
-
+    try:
+        import dashcheck.browser  # noqa: F401
+    except ImportError:
+        return None
     return request.getfixturevalue("acceptance_inputs")
 
 
@@ -102,11 +105,13 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
         NO_SLICE_VAR,
         PAGE_ASSET,
         PALETTE,
+        PLACEMENTS,
         PROJECT_SWITCH_MARGIN,
         SIDES,
         SLICE_VARS,
         START_VARIANT,
         SWITCH_KINDS,
+        TOKENLESS_RUNS,
         declared_faults,
         palette_values,
         run,
@@ -119,7 +124,7 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
     from startcheck import runner
     from startcheck.runner import UnitCommand, restore, start, stop
 
-    # S-508's session fixture, looked up in the test; its helpers are taken from the conftest module
+    # S-519's session fixture, looked up in the test; its helpers are taken from the conftest module
     # pytest loaded, the one that defines the fixture's own AcceptanceInputs.
     inputs = request.getfixturevalue("acceptance_inputs")
     conftest = sys.modules[type(inputs).__module__]
@@ -145,7 +150,7 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
     if hasattr(browser, "start"):
         monkeypatch.setattr(browser, "start", recording_start)
 
-    # 5, second half: no launcher is refused before anything is restored or started.
+    # 6, second half: no launcher is refused before anything is restored or started.
     with pytest.raises(ValueError):
         run(running, rebuilt, check_root, pristine_store, pristine_prompts, env, None)
     assert os.listdir(check_root) == [], os.listdir(check_root)
@@ -170,7 +175,7 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
     finally:
         session.close()
 
-    # 4. The timings table and every tokenless and declared fault line, written out before judging.
+    # 5. The timings table and every tokenless and declared fault line, written out before judging.
     lines = ["project\tkind\ttoday_median_s\trebuilt_median_s\tratio\tuntimed"]
     lines += [
         f"{t.project}\t{t.kind}\t{t.today_median_s}\t{t.rebuilt_median_s}\t{t.ratio}\t{', '.join(t.untimed)}"
@@ -183,7 +188,7 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
     written = out.read_text(encoding="utf-8")
     assert all(line in written for line in lines)
 
-    # 5. Every start inside run went through the launcher, on START_VARIANT, one prepare each.
+    # 6. Every start inside run went through the launcher, on START_VARIANT, one prepare each.
     assert starts, "run started no unit"
     assert all(variant == START_VARIANT for _, variant, _ in starts), starts
     assert all(given is launcher for _, _, given in starts), starts
@@ -204,18 +209,24 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
         assert getattr(report, name) == (), (name, getattr(report, name))
     assert report.passed is True
 
-    # 2. The rebuilt page file's palette block against today's page file, independently of the report.
+    # 2. The four token-less runs: every placement on every side.
+    assert len(TOKENLESS_RUNS) == 4
+    assert set(TOKENLESS_RUNS) == {(p, s) for p in PLACEMENTS for s in SIDES}
+
+    # 3. The rebuilt page file's palette block against today's page file side for side, independently
+    # of the report.
     rebuilt_text = Path(inputs.rebuilt_install, "mu_spec", PAGE_ASSET).read_text(encoding="utf-8")
     today_text = Path(inputs.running_install, "mu_spec", PAGE_ASSET).read_text(encoding="utf-8")
     values, extra = palette_values(rebuilt_text)
     assert extra == [], extra
     fallbacks = {k for k in values if k[0] == "fallback"}
     slices = {k for k in values if k[0] == "slice"}
-    assert fallbacks == {("fallback", t, s) for t in PALETTE for s in SIDES}
+    assert fallbacks == {("fallback", t, s) for t in PALETTE for s in SIDES}, sorted(fallbacks)
     assert len(fallbacks) == DECLARED_FALLBACKS == 26
-    assert slices == {("slice", v, None) for v in (*SLICE_VARS, NO_SLICE_VAR)}
-    assert len(slices) == DECLARED_SLICES == 11
+    assert slices == {("slice", v, s) for v in (*SLICE_VARS, NO_SLICE_VAR) for s in SIDES}, sorted(slices)
+    assert len(slices) == DECLARED_SLICES == 22
     assert set(values) == fallbacks | slices
+    assert len(values) == 48
     with sync_playwright() as p:
         chromium = p.chromium.launch()
         try:
@@ -226,7 +237,7 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
             chromium.close()
     assert declared_faults(mine, extra, todays) == []
 
-    # 3. A row for every stored project and kind; the switch medians against today's.
+    # 4. A row for every stored project and kind; the switch medians against today's.
     rows = {(t.project, t.kind): t for t in report.timings}
     assert set(rows) >= {(p, k) for p in stored for k in SWITCH_KINDS}, sorted(rows)
     head = rows[(largest, "project")]
@@ -239,5 +250,5 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
         if key != (largest, "project"):
             assert t.rebuilt_median_s < t.today_median_s, t
 
-    # 6. The staged copy is byte-unchanged.
+    # 7. The staged copy is byte-unchanged.
     assert snapshot(pristine_store) == before
