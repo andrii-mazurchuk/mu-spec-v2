@@ -1,6 +1,6 @@
-"""The page template's shape (T-473).
+"""The page template's shape (T-489).
 
-The S-390 constants are read from dashboard/src/render.ts by running bun over
+The S-509 constants are read from dashboard/src/render.ts by running bun over
 it; S-13's TEMPLATE, ENTRY and MARKER are read by bun from the build module's
 own `export const` initialisers. The build module is not imported: importing
 it runs the build, which writes the page. The template is parsed by rules of
@@ -17,10 +17,12 @@ REPO = Path(__file__).resolve().parents[2]
 PAGE = REPO / "dashboard"
 RENDER = "dashboard/src/render.ts"
 BUILD = "dashboard/build.ts"
+RULE = re.compile(r"([^{}]+?)\s*\{([^{}]*)\}")
 DECLARATION = re.compile(r"([A-Za-z-][A-Za-z0-9-]*)\s*:\s*([^;{}]+?)\s*(?=[;}])")
 SCHEME_OR_NETWORK = re.compile(r"^\s*([A-Za-z][A-Za-z0-9+.-]*:|//)")
 COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-WORD = re.compile(r"[A-Za-z0-9_$]")
+# S-509's bounded naming rule: an identifier character, as its IDENT_CHARS.
+BOUND = "[A-Za-z0-9_$]"
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
 
@@ -38,9 +40,11 @@ def read_constants() -> dict:
         "}"
         "console.log(JSON.stringify({...s13,"
         " PALETTE: r.PALETTE, SLICE_VARS: r.SLICE_VARS, NO_SLICE_VAR: r.NO_SLICE_VAR,"
+        " SIDE_CONDITION: r.SIDE_CONDITION, PALETTE_DECLARATIONS: r.PALETTE_DECLARATIONS,"
         " PALETTE_BEGIN: r.PALETTE_BEGIN, PALETTE_END: r.PALETTE_END,"
         " MARKUP_SINKS: r.MARKUP_SINKS, ADDRESS_SINKS: r.ADDRESS_SINKS,"
-        " FALLBACKS: r.PALETTE.map((t) => r.fallbackName(t))}));"
+        " COLOUR_LITERAL: r.COLOUR_LITERAL.source, COLOUR_VAR: r.COLOUR_VAR.source,"
+        " FALLBACKS: Object.fromEntries(r.PALETTE.map((t) => [t, r.fallbackName(t)]))}));"
     )
     done = subprocess.run(
         ["bun", "-e", script], check=False, cwd=REPO, capture_output=True, text=True, encoding="utf-8",
@@ -54,16 +58,17 @@ def read_constants() -> dict:
 
 
 def names(text: str, sink: str) -> bool:
-    """True when sink occurs in text, not touching another word character at a word-character end."""
-    at = text.find(sink)
-    while at != -1:
-        end = at + len(sink)
-        before = WORD.match(sink[0]) and at > 0 and WORD.match(text[at - 1])
-        after = WORD.match(sink[-1]) and end < len(text) and WORD.match(text[end])
-        if not before and not after:
-            return True
-        at = text.find(sink, at + 1)
-    return False
+    """True when sink occurs in text, not run into an identifier on either identifier-character end."""
+    before = rf"(?<!{BOUND})" if re.fullmatch(BOUND, sink[0]) else ""
+    after = rf"(?!{BOUND})" if re.fullmatch(BOUND, sink[-1]) else ""
+    return re.search(before + re.escape(sink) + after, text) is not None
+
+
+def rules(s: str) -> list[tuple[str, list[tuple[str, str]]]]:
+    """(selector stripped, declarations) for each rule in s, /* */ comments removed first."""
+    s = COMMENT.sub("", s)
+    # The declarations are read through the rule's closing brace, so a last one with no ';' still counts.
+    return [(m.group(1).strip(), DECLARATION.findall(s, m.start(2), m.end())) for m in RULE.finditer(s)]
 
 
 class Tags(HTMLParser):
@@ -145,9 +150,10 @@ def test_template_shape():
     assert len([a for a in metas if (a.get("name") or "").strip().lower() == "viewport"]) == 1, "no single viewport meta"
     assert [t for t, _ in head_tags.starts].count("title") == 1, "no single title"
     assert head_tags.title.strip(), "the title is empty"
-    for tag in ("link", "base", "script", "style"):
+    for tag in ("link", "base", "style"):
         assert tag not in [t for t, _ in head_tags.starts], f"head holds a {tag} tag"
     assert not [a for a in metas if (a.get("http-equiv") or "").strip().lower() == "refresh"], "head holds a meta refresh"
+    assert "<script" not in text.lower(), "the template holds a script of its own"
 
     # 3. One palette block, opening the style element.
     assert text.count(begin) == 1 and text.count(end) == 1, (text.count(begin), text.count(end))
@@ -156,21 +162,31 @@ def test_template_shape():
     assert style_at <= b_at and e_at + len(end) <= style_end, "the palette block is not inside the style element"
     assert style.lstrip().startswith(begin), "the style element does not open with the palette block"
 
-    # 4. The block's declarations: each fallback twice, each slice colour once, 37 in all.
-    block = COMMENT.sub("", text[b_at + len(begin) : e_at])
+    # 4. The block: a light rule then a dark rule, each declaring every fallback and slice colour once.
+    slices = [*consts["SLICE_VARS"], consts["NO_SLICE_VAR"]]
+    expected = sorted([*consts["FALLBACKS"].values(), *slices])
+    assert len(expected) == len(set(expected)) == 24, expected
+    block = text[b_at + len(begin) : e_at]
+    block_rules = rules(block)
+    sides = consts["SIDE_CONDITION"]
+    assert [s for s, _ in block_rules] == [sides["light"], sides["dark"]], [s for s, _ in block_rules]
+    for selector, decls in block_rules:
+        assert sorted(n for n, _ in decls) == expected, (selector, [n for n, _ in decls])
+    assert sum(len(d) for _, d in block_rules) == consts["PALETTE_DECLARATIONS"] == 48
+    assert not RULE.sub("", COMMENT.sub("", block)).strip(), "the block holds text outside its two rules"
 
-    def declared(name: str) -> int:
-        return len(re.findall(r"(?<![A-Za-z0-9-])" + re.escape(name) + r"\s*:", block))
+    # 5. The page's own rules: no colour literal, only token-with-fallback or bare slice vars, no dark side of their own.
+    own = style[: b_at - style_at] + style[e_at + len(end) - style_at :]
+    literal = re.compile(consts["COLOUR_LITERAL"])
+    assert not literal.search(own), literal.findall(own)
+    allowed = {(t, f) for t, f in consts["FALLBACKS"].items()} | {(s, None) for s in slices}
+    for m in re.finditer(consts["COLOUR_VAR"], own):
+        assert (m.group(1), m.group(2)) in allowed, m.group(0)
+    for selector, _ in rules(own):
+        assert sides["dark"] not in selector, f"a page rule sits under {selector!r}"
+    assert "prefers-color-scheme" not in own.lower(), "the page's own rules hold prefers-color-scheme"
 
-    for fallback in consts["FALLBACKS"]:
-        assert declared(fallback) == 2, (fallback, declared(fallback))
-    for slice_var in [*consts["SLICE_VARS"], consts["NO_SLICE_VAR"]]:
-        assert declared(slice_var) == 1, (slice_var, declared(slice_var))
-    expected = 2 * len(consts["PALETTE"]) + len(consts["SLICE_VARS"]) + 1
-    assert expected == 37
-    assert len(DECLARATION.findall(block)) == expected, DECLARATION.findall(block)
-
-    # 5. The body: the root element only, then the marker once.
+    # 6. The body: the root element only, then the marker once.
     assert text.count(marker) == 1, f"MARKER {text.count(marker)} times"
     assert body_at <= text.index(marker) < body_end, "MARKER is not inside body"
     body_tags = parse(body.replace(marker, ""))
@@ -182,7 +198,7 @@ def test_template_shape():
     assert root_end, f"no </{root}> in body"
     assert body.index(marker) > root_end.start(), "MARKER is not after the root element's end tag"
 
-    # 6. The entry looks the root up by its id.
+    # 7. The entry looks the root up by its id.
     r = attrs.get("id")
     assert r, f"the root <{root}> has no id"
     entry = PAGE / consts["ENTRY"]
@@ -190,7 +206,7 @@ def test_template_shape():
     entry_text = entry.read_text(encoding="utf-8")
     assert re.search(r"([\"'`])" + re.escape(r) + r"\1", entry_text), f"{consts['ENTRY']} holds no literal {r!r}"
 
-    # 7. No attribute names a URL with a scheme or a leading //; no url( and no @import.
+    # 8. No attribute names a URL with a scheme or a leading //; no url( and no @import.
     outside = parse(element.sub("", text, count=1))
     for tag, a in outside.starts:
         for key, value in a.items():
@@ -198,6 +214,6 @@ def test_template_shape():
     assert "url(" not in text.lower(), "the template holds url("
     assert "@import" not in text.lower(), "the template holds @import"
 
-    # 8. No markup or address sink is named anywhere in the template.
+    # 9. No markup or address sink is named anywhere in the template.
     for sink in [*consts["MARKUP_SINKS"], *consts["ADDRESS_SINKS"]]:
         assert not names(text, sink), f"the template names {sink!r}"
