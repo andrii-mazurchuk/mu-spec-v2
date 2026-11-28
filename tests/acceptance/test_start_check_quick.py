@@ -11,7 +11,7 @@ that need it. The test never skips: a missing input or launcher fails it.
 import sys
 
 
-def test_quick_variants(acceptance_inputs, tmp_path):
+def test_quick_variants(request, tmp_path):
     from startcheck.inputs import unit_commands
     from startcheck.judge import run
     from startcheck.ownenv import own_env
@@ -19,7 +19,9 @@ def test_quick_variants(acceptance_inputs, tmp_path):
 
     from startcheck.variants import QUICK
 
-    inputs = acceptance_inputs
+    # The acceptance fixture's value, taken inside the test: an unset or missing input fails the test
+    # with the fixture's message naming the variable, and the modules under test are imported first.
+    inputs = request.getfixturevalue("acceptance_inputs")
     # The constant from the acceptance conftest itself, as pytest loaded it: the tests folder is no
     # package, so the module that defined the fixture's record type is the one place to read it from.
     REFERENCE_INSTALL_VAR = sys.modules[type(inputs).__module__].REFERENCE_INSTALL_VAR
