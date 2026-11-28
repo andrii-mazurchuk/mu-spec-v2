@@ -80,6 +80,18 @@ def normaliser(page):
     return normalise
 
 
+@pytest.fixture(scope="session")
+def acceptance_inputs(request):
+    """S-508's acceptance_inputs itself, set up only once the module under test imports.
+
+    The conftest fixture is autouse, so without this it runs before the test body: while dashcheck is
+    absent the test would fail on a missing acceptance input instead of on the absent module.
+    """
+    import dashcheck.browser  # noqa: F401
+
+    return request.getfixturevalue("acceptance_inputs")
+
+
 def test_browser_check_passes(request, tmp_path, monkeypatch):
     # The modules under test first, so while they are absent this test fails for that reason and not
     # for an acceptance input the environment lacks.
