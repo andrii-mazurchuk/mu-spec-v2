@@ -77,12 +77,29 @@ def listens(port: int) -> bool:
         return False
 
 
+def entry_origin(install_root: str) -> str:
+    """The file mu_spec.main resolves to when started from install_root, as a unit is started."""
+    from startcheck.runner import ENTRY_MODULE
+
+    probe = ("import importlib.util, sys; sys.path.insert(0, sys.argv[1]); "
+             f"spec = importlib.util.find_spec({ENTRY_MODULE!r}); print(spec.origin if spec else '')")
+    done = subprocess.run((sys.executable, "-I", "-c", probe, install_root),
+                          check=False, capture_output=True, text=True, timeout=START_WINDOW_S)
+    return done.stdout.strip()
+
+
 class Unit:
     """One unit process serving one state directory on one port."""
 
     def __init__(self, install_root: str, state_dir: Path, cwd: Path) -> None:
         from mu_spec.outside import ENV_NAMES
-        from startcheck.runner import BOOTSTRAP
+        from startcheck.runner import BOOTSTRAP, ENTRY_FILE
+
+        # an installed mu_spec elsewhere on the path must not stand in for this install's own
+        origin = entry_origin(install_root)
+        own = Path(install_root, *ENTRY_FILE).resolve()
+        assert origin and Path(origin).resolve() == own, (
+            f"mu_spec.main started from {install_root} resolves to {origin or 'nothing'!r}, not {own}")
 
         self.port = free_high_port()
         self.base = f"{HOST}:{self.port}"
@@ -210,7 +227,7 @@ def seed_store(base: str) -> None:
                        {"type": "initiate", "title": "order project", "project": "p", "actor": ACTOR})
     assert 200 <= status < 300, f"post_request refused: {status} {raw!r}"
     body = decode(raw)
-    rid = next((body[f] for f in ("request_id", "id") if isinstance(body, dict) and f in body), None)
+    rid = next((body[f] for f in ("message_id", "request_id", "id") if isinstance(body, dict) and f in body), None)
     if rid is None and isinstance(body, dict) and isinstance(body.get("created"), list):
         rid = body["created"][0]
     assert rid is not None, f"post_request answer names no request id: {raw!r}"
@@ -243,6 +260,9 @@ def test_two_breaches_and_unknown_tool(tmp_path):
 
         calls = [(tool, breaking_args(spec)) for tool, spec in run_tools.items() if takes_project(spec)]
         assert calls, "the running unit's discovery lists no tool taking a project"
+        # every call that is not a GET is logged, refused or not, with the time each unit saw it;
+        # the reads go first, so no read answers with an event the two units timed differently
+        calls.sort(key=lambda c: route_of(run_tools[c[0]], c[0])[0] != "GET")
         calls.append((UNKNOWN_TOOL, {}))
 
         answers = [(tool, args, call(running.base, run_tools.get(tool), tool, args),

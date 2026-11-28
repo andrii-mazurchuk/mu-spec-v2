@@ -100,9 +100,9 @@ def test_list_tools_and_dashboard_separation():
     assert plain(discovery_body()) == {"unit": "mu-spec", "tools": l0}
 
     # 3. importing every dashboard route module changes nothing
-    assert tuple(DASH_ROUTE_MODULES) == ROUTE_MODULES
     for name in DASH_ROUTE_MODULES:
         importlib.import_module(name)
+    assert DASH_ROUTE_MODULES == ROUTE_MODULES
     assert plain(list_tools()) == l0
     assert plain(discovery_body()) == {"unit": "mu-spec", "tools": l0}
     assert len(TOOLS) == 41
