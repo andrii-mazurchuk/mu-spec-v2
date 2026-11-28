@@ -136,9 +136,10 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
     starts: list[tuple[str, str, object]] = []
     original = runner.start
 
-    def recording_start(cmd, variant, root, own, launcher=None):
+    # start's own parameter names, so a run() calling it positionally or by keyword is recorded alike.
+    def recording_start(cmd, variant, check_root, own_env, launcher=None):
         starts.append((cmd.label, variant, launcher))
-        return original(cmd, variant, root, own, launcher)
+        return original(cmd, variant, check_root, own_env, launcher)
 
     monkeypatch.setattr(runner, "start", recording_start)
     if hasattr(browser, "start"):
