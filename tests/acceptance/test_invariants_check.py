@@ -8,6 +8,21 @@ test are imported inside the test, so a module not yet written fails only the te
 import hashlib
 import os
 
+import pytest
+
+
+@pytest.fixture(scope="session")
+def acceptance_inputs(request):
+    """S-508's acceptance_inputs itself, set up only once the module under test imports.
+
+    The conftest fixture is autouse, so without this it runs before the test body: while
+    unitcheck.invariants is absent the test would fail on a missing acceptance input instead of on the
+    absent module.
+    """
+    import unitcheck.invariants  # noqa: F401
+
+    return request.getfixturevalue("acceptance_inputs")
+
 
 def snapshot(folder: str) -> dict[str, str]:
     """posix relpath -> sha256 of every file under folder."""
