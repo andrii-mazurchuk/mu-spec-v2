@@ -1084,8 +1084,9 @@ class _Ship:
         return now_wired
 
     def sweep(self) -> None:
-        """Open issues of this project no key owns are closed not planned, unless picked up."""
-        if self.ours is None or self.only is not None:
+        """Open issues of this project no key owns are closed not planned, unless picked up. As in the
+        running unit, the sweep runs only when the project has pickup labels."""
+        if self.ours is None or not self.pickup or self.only is not None:
             return
         owned = {_number(v) for v in self.issues.values() if v.get("number") is not None}
         owned |= {_number(v.get("root")) for v in self.issues.values() if _number(v.get("root"))}
