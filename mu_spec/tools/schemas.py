@@ -1,0 +1,1034 @@
+"""The one declaration of the 41 tools: name, description, method, path and input shape.
+
+Copied verbatim from the running unit's discovery entries, in its listed order. DECLS is the only
+place in the package a tool's name, description, method, path or input shape is written; the
+catalogue's binding, the discovery answer, the lookup by path and the registry check are computed
+from it.
+
+The declared input shape is for discovery only and never decides a call: there is no generic shape
+check, and each field check the running unit makes is a rule with its own refusal key beside its
+tool's handler. This module imports only the standard library, so any module may import it without
+reaching a handler, a reader or measurement.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ToolSchema:
+    name: str  # bare tool name, as the running unit declares it
+    description: str  # verbatim
+    input_schema: Mapping[str, object]  # verbatim, keys in the running unit's order; declared for discovery only
+    method: str  # 'GET' or 'POST', as the running unit's discovery entry gives it
+    path: str  # the route pattern, '{x}' for a parameter, as the running unit's discovery entry gives it
+
+
+DECLS: tuple[ToolSchema, ...] = (
+    ToolSchema(
+        name="post_request",
+        description=(
+            "The only way to ask this unit for a change. `type` is one of: initiate (start a new "
+            "project); feature (ask for something the product does not do yet); correction (say that "
+            "something is wrong); verification (ask for the scenarios that would falsify part of the "
+            "design); comment (attach a question or observation to part of the design); question (ask "
+            "something that needs an answer rather than a change). You never name a layer or write an "
+            "entry -- the type decides how deep the change may reach, and an agent decides what actually "
+            "changes. `targets` is optional and usually omitted: you are not expected to know how the "
+            "design is laid out. `title` is the ask in one line and is required; `body` carries the "
+            "detail; `origin` names who is asking, and is recorded as worded. Send `actor` (your session "
+            "or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/inbox",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["initiate", "feature", "correction", "verification", "comment", "question"],
+                },
+                "project": {"type": "string"},
+                "title": {"type": "string"},
+                "body": {"type": "string"},
+                "targets": {"type": "array", "items": {"type": "string"}},
+                "origin": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["type", "title"],
+        },
+    ),
+    ToolSchema(
+        name="list_requests",
+        description=(
+            "The request queue. Filter by status, project, type, or target. This is what the processing "
+            "agent reads to find work."
+        ),
+        method="GET",
+        path="/inbox",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "accepted", "rejected"]},
+                "project": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "enum": ["initiate", "feature", "correction", "verification", "comment", "question"],
+                },
+                "target": {"type": "string"},
+            },
+            "required": [],
+        },
+    ),
+    ToolSchema(
+        name="get_request",
+        description="One request, with what it has produced so far.",
+        method="GET",
+        path="/inbox/{mid}",
+        input_schema={
+            "type": "object",
+            "properties": {"mid": {"type": "string"}},
+            "required": ["mid"],
+        },
+    ),
+    ToolSchema(
+        name="resolve_request",
+        description=(
+            "Close a request: accepted (with what it produced) or rejected (with why, in `note`). "
+            "Leaving it pending keeps the queue honest. `produced` is the identifiers this request "
+            "created, which is what later lets a correction be traced to the request it served. Send "
+            "`actor` (your session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/inbox/{mid}/resolve",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "mid": {"type": "string"},
+                "status": {"type": "string", "enum": ["accepted", "rejected"]},
+                "note": {"type": "string"},
+                "produced": {"type": "array", "items": {"type": "string"}},
+                "actor": {"type": "string"},
+            },
+            "required": ["mid"],
+        },
+    ),
+    ToolSchema(
+        name="create_project",
+        description=(
+            "Create an empty project. Cite the `initiate` request that authorised it in "
+            "`in_response_to`. The intent entries themselves arrive as a normal amendment, so they are "
+            "derived and interviewed for rather than lifted verbatim from whatever the requester typed. "
+            "Send `actor` (your session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "in_response_to": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "in_response_to"],
+        },
+    ),
+    ToolSchema(
+        name="fork_project",
+        description=(
+            "Copy a project's live corpus to a new project `name`, so a run works on its own copy and "
+            "the source stays frozen. Cite an `initiate` request in `in_response_to`. Entries, slices, "
+            "modules, labels and identifier numbering carry over. Requests, issues, lifecycle events, "
+            "cuts and emissions do not: a fork starts with none of them, and `left_behind` reports what "
+            "stayed on the source. `repo` and any delegation are cleared, so a fork cannot ship into the "
+            "source's tracker until a person points it at one. `name` takes letters, digits, '-' and "
+            "'_'. An existing name is refused with 409, so a retry after a timeout is safe: check "
+            "`list_projects`, and a fork that is listed landed. Send `actor` (your session or agent "
+            "name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/fork",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "name": {"type": "string"},
+                "in_response_to": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "name", "in_response_to"],
+        },
+    ),
+    ToolSchema(
+        name="submit_amendment",
+        description=(
+            "Record a batch of derived entries -- the pipeline's own write path. Cite the request it "
+            "serves in `in_response_to`: an inbox message id, or an issue id (iss-NNNN, open or "
+            "escalated, this project) when repairing what that issue names. An issue-cited fix starts at "
+            "the layer of the issue's target and may then propagate downward citing the same issue; one "
+            "reaching above the target is refused -- escalate the issue instead. Each entry needs a "
+            "'layer' and a 'title', and may carry 'body', 'purpose', 'supersedes', and two kinds of "
+            "edge: 'derives_from' (identifiers exactly one layer up -- what it serves) and 'depends_on' "
+            "(same layer -- what it needs, and what imposes order). 'emits_into' is refused: the "
+            "cross-cutting type was removed, and an ambient concern is a foundational slice reached with "
+            "depends_on. Any other entry field is refused, 'slice' included: the slice is named once, on "
+            "the amendment. Replacing an entry that sits in a slice needs that amendment-level 'slice', "
+            "or the replacement would land unassigned. The reply carries `gates_delta` -- sound, "
+            "complete, and only the findings this amendment `added` or `resolved` -- not the project's "
+            "whole report; send 'full': true for that as `gates`. A dry run answers the same way. When "
+            "the amendment cites an issue and is the LAST of its fix, send 'closes_issue': true to close "
+            "that issue resolved with what it produced (`closed_issue` in the reply). Leave it off until "
+            "then: a fix propagates downward citing the same issue, and a closed issue can no longer be "
+            "cited. close_issue remains for already-answered and rejected. Validated as one transaction: "
+            "an amendment introducing an orphan, a broken horizontal edge, a slice cycle, a spec whose "
+            "`Imports:` line names an entry it does not depends_on, or a second successor to an id is "
+            "refused whole, and the first entry created for a request must sit within that request "
+            "type's permitted origination depth. Entries left unserved are reported, not refused. A "
+            "supersession strands every entry pointing at what it retired; set 'preserves_interface': "
+            "true on the replacement when nothing a pointing entry consumed has changed -- a reworded "
+            "sentence, a stated exemption, an added dependency -- and those edges carry to the "
+            "replacement instead. That is a judgement about meaning and you are answerable for it: a "
+            "changed signature, field, return or behaviour is NOT preserving, and claiming it is hides "
+            "exactly the consumers this graph exists to surface. Either way, every module declared as "
+            "implementing the retired entry is re-pointed to the replacement in the same write "
+            "(`repointed_modules`, each {module, was, now}); tests deriving from it and entries "
+            "depending on it are never rewritten, only listed -- `restate_or_keep` (test ids: restate or "
+            "keep is your call) and `dependents_stranded` (depends_on the retired entry, not carried "
+            "because the replacement does not preserve the interface). `same_wave_edges` lists, never "
+            "refuses, each new entry depending on another slice that sat in the same wave as its own "
+            "when this was written -- the two were worked side by side, so check what it read was "
+            "finished. To depend on an entry this same amendment is creating, cite it by position as "
+            "'#0', '#1' -- a zero-based index into 'entries'. Identifiers are allocated on commit, so "
+            "guessing one is how a horizontal edge ends up pointing at a real entry that is the wrong "
+            "entry, which every gate passes. Placeholders work in 'depends_on' only; 'derives_from' "
+            "points one layer up and an amendment writes one layer, so a sibling is never a parent. "
+            "'slice' must name a slice that already exists -- one comes from ratifying a slicing or from "
+            "split_slice, never from being named here, because slices split and never merge and one "
+            "created by a typo cannot be undone -- and a test entry takes no slice at all, because its "
+            "column is the column of the spec entry it derives from. Layer 'T' is a test: one scenario, "
+            "deriving from exactly one spec entry and carrying no horizontal edge. Its 'purpose' is free "
+            "text for whoever writes the test; nothing branches on it. `tests_of_dependents` lists the "
+            "tests of every entry depending, at any distance, on what a supersession retires: their "
+            "fixtures may assert what you removed, so read them before the cut. **Preview first**: send "
+            "the same body with `dry_run: true` and you get exactly what this call would answer -- "
+            "created ids, blast_radius, restate_or_keep, dependents_stranded, tests_of_dependents, "
+            "repointed_modules, gates, or the refusal with its findings or `reason` -- always status 200 "
+            "with `admitted` saying what the commit would do, and nothing written, no id allocated, no "
+            "request or issue touched. A preview also returns `would_ship`: the shipped units whose "
+            "contract this moves, each {key, number, ship: 'edit' (open issue rewritten) or 'follow_up' "
+            "(closed completed, so a new issue)}, or null while the change leaves the graph unsound. "
+            "**Send an `idempotency_key`** (any unique string you choose, e.g. a uuid) on every "
+            "amendment you might retry: a write can time out and still land, and a blind retry without a "
+            "key writes the entries twice. A repeat with the same key in this project returns the "
+            "original answer (same ids, `replayed: true`) and writes nothing; the same key with a "
+            "different body is a 409. A refused amendment does not use up its key. Send `actor` (your "
+            "session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/amendments",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "slice": {"type": "string"},
+                "in_response_to": {"type": "string"},
+                "entries": {"type": "array", "items": {"type": "object"}},
+                "dry_run": {"type": "boolean"},
+                "idempotency_key": {"type": "string"},
+                "full": {"type": "boolean"},
+                "closes_issue": {"type": "boolean"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "in_response_to", "entries"],
+        },
+    ),
+    ToolSchema(
+        name="split_slice",
+        description=(
+            "Move part of a slice out into a NEW slice, named by 'into', carrying the identifiers listed "
+            "in 'members'. The only correction available to a cut that turned out too coarse: slices "
+            "split and never merge, because merging destroys identifier locality, so a target that "
+            "already exists is refused and there is deliberately no operation in the other direction. "
+            "Nothing is renumbered -- identifiers encode layer and creation order, never slice, so "
+            "membership moves and every historical reference still resolves. Refused if the split would "
+            "break the slice structure, which it can: two halves that referred to each other inside one "
+            "slice become two slices referring to each other, and that may be a cycle. `into` names the "
+            "new slice and `members` the identifiers moving to it; put the reason in `note`, which is "
+            "the only record of why a permanent cut was made where it was. Send `actor` (your session or "
+            "agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/slices/{slice}/split",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "slice": {"type": "string"},
+                "into": {"type": "string"},
+                "members": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "slice", "into", "members"],
+        },
+    ),
+    ToolSchema(
+        name="raise_issue",
+        description=(
+            "File a request against another slice's entry, then proceed on your own stated assumption. "
+            "There is no agent-to-agent channel and deliberately so: the agent that wrote the target is "
+            "gone, and messaging a live one would mean blocking or nondeterminism. `kind` is 'additive' "
+            "(a new entry is needed; nothing existing changes meaning, so nothing re-runs) or 'semantic' "
+            "(an existing entry others already consumed now means something else; its consumers are "
+            "invalidated). That call is a judgement about meaning, so you make it and this unit records "
+            "it. Put the claim on one line -- the router reads headers only -- and put what you assumed "
+            "in `assumption`. `raised_by` names the slice or session raising it; `round` is the "
+            "reconciliation round, omitted unless you are re-raising inside one. **Send an "
+            "`idempotency_key`** (any unique string, e.g. a uuid) whenever you might retry: a call can "
+            "time out and still land, and a retry without a key files the issue twice. The same key in "
+            "this project returns the original issue (same id, `replayed: true`) and files nothing; with "
+            "a different body it is a 409. Send `actor` (your session or agent name): every write is "
+            "logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/issues",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "target": {"type": "string"},
+                "kind": {"type": "string", "enum": ["additive", "semantic"]},
+                "claim": {"type": "string"},
+                "assumption": {"type": "string"},
+                "raised_by": {"type": "string"},
+                "round": {"type": "integer"},
+                "idempotency_key": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "target", "kind", "claim"],
+        },
+    ),
+    ToolSchema(
+        name="list_issues",
+        description=(
+            "The issue queue for a project. Filter by status (open/resolved/escalated/rejected) or by "
+            "the slice an issue targets."
+        ),
+        method="GET",
+        path="/projects/{project}/issues",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "status": {"type": "string", "enum": ["open", "resolved", "escalated", "rejected"]},
+                "slice": {"type": "string"},
+            },
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="close_issue",
+        description=(
+            "Move an issue on: resolved (with what it produced), rejected (ruled not a fault, or out of "
+            "scope -- `note` is the reason and is required), or escalated (it needs a human). An open "
+            "issue may go to any of the three; an escalated one only to resolved or rejected; resolved "
+            "and rejected are final. `note` is what the person reading an escalation has to go on. Send "
+            "`actor` (your session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/issues/{iid}/close",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "iid": {"type": "string"},
+                "status": {"type": "string", "enum": ["resolved", "rejected", "escalated"]},
+                "note": {"type": "string"},
+                "produced": {"type": "array", "items": {"type": "string"}},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "iid"],
+        },
+    ),
+    ToolSchema(
+        name="get_reconciliation",
+        description=(
+            "The open issue queue grouped into one repair batch per target slice, in dependency order. "
+            "Run this after every wave, not once per layer. Each batch carries its re-run scope: the "
+            "entries that consumed a meaning one of its issues says has moved, computed at entry level, "
+            "so usually a handful rather than a column. `escalations` are the issues that are not "
+            "repairs -- past the two-round cap, or semantically reaching back into a wave that is "
+            "already finished -- and those need a human. This returns the batches as data; running a "
+            "repair session is the caller's job."
+        ),
+        method="GET",
+        path="/projects/{project}/reconcile",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_waves",
+        description=(
+            "The order the slices may be worked in, computed from the dependency graph rather than "
+            "chosen. Slices in one wave have no edge between them, so they can be worked in parallel "
+            "with nothing to coordinate; every earlier wave is complete before the next begins, so each "
+            "reads its dependencies as frozen. `chain: true` means every wave is one slice wide -- "
+            "nothing can be done in parallel, and the slices are probably too coupled. `unschedulable` "
+            "is only non-empty when the gates have already refused the graph."
+        ),
+        method="GET",
+        path="/projects/{project}/waves",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="propose_slicing",
+        description=(
+            "The graph half of the grouping problem, before any slice exists: which behaviours share an "
+            "intent parent, and how far each parent spreads. A parent whose children scatter widely is "
+            "either constraint-shaped or evidence the cut runs across the grain of intent -- two "
+            "opposite readings, which is why it is reported rather than acted on. Grouping by shared "
+            "nouns is YOUR job: this unit never looks inside a body."
+        ),
+        method="GET",
+        path="/projects/{project}/slicing/candidates",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="score_slicing",
+        description=(
+            "Score a proposed partition WITHOUT creating it. `proposal` maps slice name to a list of "
+            "entry ids. Runs every gate and every structural metric as though the cut were real, and "
+            "commits nothing -- which is what makes trialling several slicings possible, since slices "
+            "split and never merge. `legal` is computed; good is not. Nothing here gates or refuses "
+            "anything. Send `actor` (your session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/slicing/score",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "proposal": {"type": "object"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "proposal"],
+        },
+    ),
+    ToolSchema(
+        name="get_insights",
+        description=(
+            "Everything measurable about how a project has gone. `change_locality` is the primary score "
+            "and is not a proxy: a good slicing is one where a typical change lands inside one slice, "
+            "and every request already records exactly which entries it produced. `corrections` is where "
+            "defects entered, which reads as a pipeline diagnostic -- clustered at intent means the "
+            "interview was shallow. Issue pairs measure co-change, but are endogenous: that history was "
+            "produced under one particular cut. Inputs to a judgement, never a judgement."
+        ),
+        method="GET",
+        path="/projects/{project}/insights",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="list_events",
+        description=(
+            "The project lifecycle in order -- requests as they were actually worded, derivations, "
+            "corrections and the layer each entered at, refusals, and every assumption an agent had to "
+            "make because it could not derive something. This is what the graph cannot tell you: a gate "
+            "that failed and was then fixed leaves no trace in the fixed graph. Pass `since` (a seq) to "
+            "page. Analysis, not operation -- never load this during ordinary work."
+        ),
+        method="GET",
+        path="/projects/{project}/events",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "request",
+                        "derivation",
+                        "correction",
+                        "refusal",
+                        "slicing",
+                        "classification",
+                        "issue_raised",
+                        "issue_closed",
+                        "plan",
+                        "audit",
+                        "work_units",
+                        "tickets_emitted",
+                        "tickets_rolled_back",
+                        "ship_failed",
+                        "mutation",
+                        "delegation",
+                        "auto_ship",
+                        "forked",
+                    ],
+                },
+                "since": {"type": "integer"},
+            },
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_slice_context",
+        description=(
+            "One slice assembled for READING: its spec entries with full bodies, the justification chain "
+            "for each, read-only context from the slices this one depends on (projected from the "
+            "entries' own edges, never declared beside them). For reviewing or authoring a column, not "
+            "for building it -- a slice's files are not disjoint from other slices' files, so a slice is "
+            "not a safe branch scope. Execution scope is a work unit: see get_work_unit. Also carries "
+            "`scenarios` -- the test entries already written against this column's contracts, spine "
+            "only, each naming what it judges and whether a file implements it yet -- and `untested`, "
+            "the contracts with no scenario at all. Read both before writing scenarios: the first is "
+            "what not to repeat, the second is the work list. Refused if the graph is unsound. Use it as "
+            "the ONE read before authoring or auditing a slice at a layer, rather than fetching entries "
+            "one by one: `layer` is B, A, S (default) or T (intent is not sliced); `neighbours` gives "
+            "each depends_on entry outside the set as its title plus interface lines (Imports, Errors, "
+            "top-level signatures) and no body; `open_issues` lists the slice's open issues. `max_chars` "
+            "(default 60000; 0 for no cap) is a budget for the ANCESTORS only: over it, ancestor bodies "
+            "are dropped from the top layer down, each named in `truncated` (fetch one by id if you need "
+            "it). `entries` are always whole, so a large slice can exceed the cap; read a big slice's "
+            "entries with review_layer, which pages."
+        ),
+        method="GET",
+        path="/projects/{project}/slice-context",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "slice": {"type": "string"},
+                "layer": {"type": "string", "enum": ["B", "A", "S", "T"]},
+                "max_chars": {"type": "integer"},
+            },
+            "required": ["project", "slice"],
+        },
+    ),
+    ToolSchema(
+        name="get_work_unit",
+        description=(
+            "One work unit and everything needed to build it, addressed EITHER by its key, exactly as "
+            "the unit listing reports it, OR by ANY entry it contains, spec or test. A work unit is ONE "
+            "spec entry together with every module implementing it -- one unit is one branch and one "
+            "ticket. A test unit is the scenarios derived from one spec entry and the files implementing "
+            "those; its key is the spec entry it is anchored to, plus `-T` (`S-01-T`) -- and that key is "
+            "a key only, never an entry identifier, so pass it as the key. Its `write_set` is module "
+            "PATHS, and those paths are NOT exclusive: a file implementing several spec entries is "
+            "written by several units. `overlap` names the units this one shares a file with, and they "
+            "MUST NOT be worked at the same time. Overlap is not an order -- neither waits for the other "
+            "and nothing says which goes first -- so it is reported separately from `follows`, and "
+            "choosing is the caller's job. `file_scope` is the other half of that: for each file in the "
+            "write set, the other contracts it must eventually serve, with bodies. Read it before "
+            "designing anything. A unit is one contract but a file is not, and whichever unit reaches a "
+            "file first decides its shape for all of them. Also carries the entries with full bodies, "
+            "ONE justification chain for the whole unit -- every entry in a unit shares an anchor and so "
+            "an ancestry -- a spine-only read set of what it depends on elsewhere, `follows` -- the "
+            "units this one waits on -- and `size`, for deciding how many units one session should take. "
+            "A unit holding test modules is one of those: the unit implementing a spec entry follows the "
+            "unit holding the scenarios derived from it, which is how documentation-first, tests-second, "
+            "code-last is ordered rather than asked for. `tests` lists the scenarios judging this unit "
+            "that exist as files, with the paths to run; `tests_pending` lists the ones written but not "
+            "yet built, which are not yet expected to pass. Computed from the live graph, so it answers "
+            "what to build now; the stored cut is get_units. Refused if the graph is unsound."
+        ),
+        method="GET",
+        path="/projects/{project}/units/{entry}",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "entry": {
+                    "type": "string",
+                    "description": (
+                        "A unit key as the listing reports it (`S-01`, `S-01-T`), or any entry the unit "
+                        "contains (`S-01`, `T-30`). Iterating the listing's keys is the normal use and "
+                        "works for both kinds of unit."
+                    ),
+                },
+            },
+            "required": ["project", "entry"],
+        },
+    ),
+    ToolSchema(
+        name="get_units",
+        description=(
+            "The current cut -- the work units a person last decided to cut the project into -- plus "
+            "`drift`, how far the live graph has moved since, and the live projection itself. Drift is "
+            "one shape rather than a vocabulary: each group names what a set of units `was` and what it "
+            "is `now`, so a split reads as one was and two now, a merge the reverse, and an empty `now` "
+            "means gone. That is what answers whether a piece of work is still the same piece. Both the "
+            "cut and the live projection carry `edges` -- what waits on what, the contract a consumer "
+            "honours -- and `overlap`, which units share files and so must not run at the same time. "
+            "Those are different relations: an edge is an order, an overlap is not. `waves` is a view "
+            "over the edges, with test units shown immediately before the work they precede."
+        ),
+        method="GET",
+        path="/projects/{project}/units",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="list_cuts",
+        description=(
+            "Every cut taken, oldest first, headers only. Which cut a piece of work came from is "
+            "answerable only because this exists -- the graph cannot recover it."
+        ),
+        method="GET",
+        path="/projects/{project}/units/cuts",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="declare_module",
+        description=(
+            "Record which spec entries -- or which test entries -- a module implements. The bottom "
+            "layer's backlink: code is not an entry in this graph, so this is the only thing tying a "
+            "file to the reasoning that produced it. Replaces rather than merges: declaring an empty "
+            "list removes the module. Spec and test identifiers are accepted, but never together in one "
+            "module: a a unit's write set is every module implementing ITS OWN entries, so a file "
+            "claiming both kinds would put the test file inside the implementation unit's write set -- "
+            "letting the agent edit the tests that judge it. A module claiming an architecture entry is "
+            "refused outright -- it has skipped the layer that says how. `path` is the file, "
+            "repository-relative, and is what a work unit hands out as its write set. Send `actor` (your "
+            "session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/modules",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "path": {"type": "string"},
+                "implements": {"type": "array", "items": {"type": "string"}},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "path", "implements"],
+        },
+    ),
+    ToolSchema(
+        name="list_modules",
+        description=(
+            "Every module backlink, and every relation computable from it. Each row carries `slices` -- "
+            "which slices the file reaches, most-represented first, because a file may serve more than "
+            "one and a single value would be an assertion rather than a fact -- and one link direction: "
+            "`covers` on a test file (the implementation files holding the contracts its tests judge) or "
+            "`covered_by` on an implementation file (the test files judging its contracts). Both are "
+            "computed from the graph and stored nowhere, so they cannot fall out of step with "
+            "`implements`. Three reports: `untested`, contracts nothing says how to falsify; "
+            "`unimplemented_tests`, tests written but not yet built, which order nothing and are not yet "
+            "expected to pass; and `uncovered_tests`, test files judging a contract nobody has built. "
+            "For spec entries no module implements, read `unimplemented` from get_units -- an entry "
+            "nothing implements is exactly an entry in no work unit."
+        ),
+        method="GET",
+        path="/projects/{project}/modules",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_plan",
+        description=(
+            "The spec-level diff since a mark, resolved into a write set (modules implementing a changed "
+            "entry -- editable) and a read set (modules that consumed a changed meaning but did not "
+            "themselves change -- context only). `since` is the `mark` a previous plan returned; omit it "
+            "for a first iteration, where the whole spec layer is the diff. This is the planner's input, "
+            "and deliberately NOT a git diff: reasoning from code makes code the source of truth and the "
+            "spec layer decorative within a few cycles. Refused while the graph is unsound."
+        ),
+        method="GET",
+        path="/projects/{project}/plan",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}, "since": {"type": "integer"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="audit_diff",
+        description=(
+            "Compare the files actually touched against the write set that was declared. This is where a "
+            "git diff belongs -- afterwards, as evidence rather than as input. YOU run git and pass the "
+            "paths in `touched`; this unit never executes anything. Pass `editable_paths`, or pass "
+            "`since` and let it derive them. A file touched outside the set is a gate failure: either "
+            "the planner missed a dependency or the executor freelanced. Send `actor` (your session or "
+            "agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/audit",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "touched": {"type": "array", "items": {"type": "string"}},
+                "editable_paths": {"type": "array", "items": {"type": "string"}},
+                "since": {"type": "integer"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "touched"],
+        },
+    ),
+    ToolSchema(
+        name="record_audit",
+        description=(
+            "Record that you ran an audit, once per run, as soon as it ends. Record a PASS too: an audit "
+            "that found nothing leaves no other trace, and an unrecorded pass is indistinguishable from "
+            "an audit that never ran. `scope` is what you audited -- entry ids and/or `slice:<name>`. "
+            "`layer` is the layer letter you audited, or `slice`, `final` or `delta`. `questions` are "
+            "the ids of the audit questions you asked (e.g. S1, T4). `outcome` is `pass` or `flagged`; "
+            "when flagged, raise each problem with raise_issue FIRST and list the iss-NNNN ids in "
+            "`issues` (empty on a pass). The one exception is a `slice` audit, whose findings go to a "
+            "person rather than onto entries: it may flag with no issues if `note` says what was "
+            "flagged. `note` is optional free text otherwise. `auditor` and `run_id` are free text "
+            "naming you and the run. This stores references only: it never judges, scores or gates "
+            "anything, and refuses only a name that does not exist. Read audits back with list_events, "
+            "kind `audit`. Send `actor` (your session or agent name): every write is logged under it."
+        ),
+        method="POST",
+        path="/projects/{project}/audits",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "scope": {"type": "array", "items": {"type": "string"}},
+                "layer": {"type": "string", "enum": ["I", "B", "A", "S", "T", "slice", "final", "delta"]},
+                "questions": {"type": "array", "items": {"type": "string"}},
+                "outcome": {"type": "string", "enum": ["pass", "flagged"]},
+                "issues": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string"},
+                "auditor": {"type": "string"},
+                "run_id": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "scope", "layer", "outcome"],
+        },
+    ),
+    ToolSchema(
+        name="review_layer",
+        description=(
+            "Read one layer with each entry's justification chain, what serves it, and the comments "
+            "attached to it -- so a reviewer sees the decision and what it claims to serve in one place. "
+            "`layer` is one of I (intent), B (behaviour), A (architecture), S (spec), T (test). T reads "
+            "the scenarios, which is where the second source of truth gets reviewed. `gates` is the "
+            "check_gates report narrowed to the entries on this page; at S, `unknown_member` and "
+            "`undefined_name` are where sibling contracts disagree on a shared interface. Paged: a reply "
+            "stays under `max_chars` (default 60000; 0 for no cap) and gives `next_after` -- pass it "
+            "back as `after` for the next page; null means the last page. Pass `slice` to read one "
+            "column at a time."
+        ),
+        method="GET",
+        path="/projects/{project}/review",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "layer": {"type": "string", "enum": ["I", "B", "A", "S", "T"]},
+                "slice": {"type": "string"},
+                "after": {"type": "string"},
+                "max_chars": {"type": "integer"},
+            },
+            "required": ["project", "layer"],
+        },
+    ),
+    ToolSchema(
+        name="get_spine",
+        description=(
+            "Every entry's identifier, one-line title and all three edge lists, with no bodies. Load "
+            "this first, decide from the structure what you need, then fetch those bodies by identifier. "
+            "`layer` is one of I (intent), B (behaviour), A (architecture), S (spec), T (test); omit it "
+            "for the whole graph. Filtering to T is how you see which scenarios already exist before "
+            "writing more."
+        ),
+        method="GET",
+        path="/projects/{project}/spine",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "layer": {"type": "string", "enum": ["I", "B", "A", "S", "T"]},
+            },
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_entry",
+        description="One entry's full body, its parents, and what derives from it.",
+        method="GET",
+        path="/projects/{project}/entries/{id}",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}, "id": {"type": "string"}},
+            "required": ["project", "id"],
+        },
+    ),
+    ToolSchema(
+        name="check_gates",
+        description=(
+            "Soundness and completeness. Sound means nothing is malformed and nothing is half-corrected; "
+            "unsound blocks work. Complete means no findings at all -- knowledge has reached spec on "
+            "every branch and every contract can be caught failing; incomplete is the to-do list and "
+            "blocks nothing. Blocking kinds: `orphan` (derives from something missing, sideways, or "
+            "nothing at all), `bad_dependency`, `stranded`, `bad_import` (a spec's `Imports:` line names "
+            "an entry it has no depends_on edge to), and two read against the module map: "
+            "`bad_module_import` (an imported module nobody declares, or whose implementer is not "
+            "depended on) and `undeclared_path` (a spec names a file under a code root that no module "
+            "declares). `split_ownership` (a file implemented from two slices) is reported, never "
+            "blocking, and so is `two_successors` (two entries supersede one id): the amendment that "
+            "would add the second claim is refused, but a fork already in the append-only history cannot "
+            "be repaired and leaves the graph sound. The module-map kinds refuse cuts and plans, not "
+            "amendments: a module is declared after the entry it implements exists. `stranded` is the "
+            "one to read differently: it means a parent was RETIRED and the finding names the successor, "
+            "so nothing is malformed -- a correction landed and has not been carried down yet. It blocks "
+            "because work must not be issued from a spec citing a retired contract, but the remedy is to "
+            "re-derive, not to repair. Correcting a TESTED spec entry strands its scenarios; re-pointing "
+            "them is a follow-on `verification` request, because an amendment writes one layer. "
+            "Reporting kinds, which never block: `unserved`, `untested`, `no_imports_line` (a spec "
+            "without the line, once the project writes it elsewhere), `split_ownership`, and five read "
+            "out of code (approximations -- each detail says what to check): `undefined_name` (a spec "
+            "imports or types over a name no live spec defines in a code block), `unknown_member` (a "
+            "spec reads `x.attr` where the class another spec declares has no such member), "
+            "`sweep_collision` (a spec's test sweeps a directory for tokens a sibling's code there must "
+            "use; both are named), and `no_module` (a spec no module implements, once the project "
+            "declares modules -- it is in no work unit, so no ticket carries it). Plus "
+            "`undeclared_test_path` (a test body names a file under a declared module's top directory "
+            "that no module declares, so the test unit cannot create it; a directory counts as declared "
+            "when a declared module lives under it) -- reported here, and only refused by auto_ship's "
+            "`tests_assigned`. `cosmetic` lists `retired_mention` (a live body citing a retired id; "
+            "tickets render it `S-02 (was S-01)`) and `unlinked_mention` (a body naming an id it has no "
+            "edge to). Neither counts against `complete`, and neither needs a re-issue."
+        ),
+        method="GET",
+        path="/projects/{project}/gates",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="submit_proposal",
+        description=(
+            "Submit a proposed slicing for ratification: a mapping of slice name to the entry "
+            "identifiers it would own, and a note carrying the rationale. Creates nothing -- a partition "
+            "is not a partition until a human rules on it. While a proposal is pending no further "
+            "slicing session is dispatched. An entry proposed for two slices is refused here rather than "
+            "at the ratification gate. Send `actor` (your session or agent name): every write is logged "
+            "under it."
+        ),
+        method="POST",
+        path="/projects/{project}/slicing/proposal",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "proposal": {"type": "object"},
+                "note": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project", "proposal"],
+        },
+    ),
+    ToolSchema(
+        name="get_proposal",
+        description=(
+            "The slicing proposal currently awaiting ratification, if any, with the note that came with "
+            "it and the reason the last one was rejected. `status` is 'pending' or 'none'."
+        ),
+        method="GET",
+        path="/projects/{project}/slicing/proposal",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="list_projects",
+        description="Every project this unit holds.",
+        method="GET",
+        path="/projects",
+        input_schema={"type": "object", "properties": {}, "required": []},
+    ),
+    ToolSchema(
+        name="get_emission",
+        description=(
+            "How far an emission of this project's work units into its issue tracker has got, and what "
+            "previous runs created. `running` says whether one is in flight; when it is, `processed` of "
+            "`total` is the progress and `phase` is `creating` or `wiring`. That run status is in memory "
+            "and a restart erases it. The durable answer for a run id is its lifecycle event: done = a "
+            "`tickets_emitted` event with that `run_id`, failed = a `ship_failed` event with that "
+            "`run_id` (`error` or `reason`), both read with list_events (`GET "
+            "/projects/{project}/events?kind=...`) and both surviving a restart. `emissions` lists "
+            "completed runs from the durable emission log. `already` maps the units of the CURRENT cut "
+            "that have issues to those issues -- so the number a run would newly create is the cut's "
+            "units minus these, which is not the same as the unit count and is the number worth knowing "
+            "before starting one. `token` says whether this unit holds a tracker token at all -- a "
+            "boolean, never the value, and the one precondition nothing in the project can answer. "
+            "`build` is the commit this process serves (null if unknown). `shipped` is what a `shipped` "
+            "press would create (`create`, keys) and how many units it would hold (`held`), null while a "
+            "run is in flight. `unassigned_tests` (T ids no test module declares, so no test unit "
+            "carries them) and `undeclared_test_paths` (`[{t, path}]`, files a T names that no module "
+            "declares, so no write set can create them) are what this press would ship without tests; "
+            "always present, empty when clean, never a refusal. Starting an emission is a person's "
+            "decision and is not offered here -- except under a delegation, through auto_ship."
+        ),
+        method="GET",
+        path="/projects/{project}/emit",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="check_ship_access",
+        description=(
+            "Ask GitHub, now, whether this unit's token is live and can write to the project's "
+            "repository -- before a Ship or an auto_ship. `ok` true means both; otherwise `reason` says "
+            "which failed: no token, no repo, a token GitHub rejects (expired, revoked, mistyped), a "
+            "repo the token cannot see, or read-only access (issues carry labels, which need write "
+            "access). Also `identity` (the account issues will be authored by) and `push`. Read-only: it "
+            "changes nothing and refuses nothing. The token is never returned."
+        ),
+        method="GET",
+        path="/projects/{project}/emit/check",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_delegation",
+        description=(
+            "Whether a person has delegated Ship for this project to agents: `delegation.enabled`, with "
+            "who granted or revoked it (`actor`), when (`at`) and their `note`. Never granted reads as "
+            "`enabled: false`. Granting is a person's decision and is not offered here; check this "
+            "before calling auto_ship."
+        ),
+        method="GET",
+        path="/projects/{project}/delegation",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="auto_ship",
+        description=(
+            "Cut the project and Ship it, on your own judgement, under a person's standing delegation "
+            "(D2). Use it after a repair you made at S or T to units already on the tracker. It does "
+            "nothing and answers 409 unless ALL hold, reported per name in `conditions` and listed in "
+            "`failed`: `delegation` (granted and not revoked), `ready` (repo set, token held, no press "
+            "in flight), `gates` (graph sound, modules declared, no dead-end citation, no loop in the "
+            "units' own edges, no shipped unit waiting on a blocker with no live issue), `st_only` "
+            "(since the cut the last press shipped, no I, B or A entry was added or superseded), "
+            "`shipped` (every unit the change touches -- entries or edges -- already has an issue) and "
+            "`tests_assigned` (no live T is in no test module -- `unassigned_tests` -- and no T names a "
+            "file no module declares -- `undeclared_test_paths`, `[{t, path}]`; declare_module them "
+            "first). A refusal is final for you: it is the person's press, so stop and say which "
+            "condition failed, never work around it. When all hold it takes a cut and presses Ship "
+            "exactly as the person's buttons do, except that it never creates an issue for a unit with "
+            "none: it edits, follows up and withdraws. Answers 202 with a `run_id` (progress via "
+            "get_emission) and `cut_seq`. Every finished run writes exactly one lifecycle event carrying "
+            "that `run_id`: done = a `tickets_emitted` event, failed (it raised, `error`, or refused, "
+            "`reason`) = a `ship_failed` event. Read them with list_events (`GET "
+            "/projects/{project}/events?kind=tickets_emitted` or `?kind=ship_failed`); both survive a "
+            "restart, while the in-flight run status in get_emission does not. `note` is kept on the cut "
+            "and the `auto_ship` event. Send `actor` (your session or agent name): every write is logged "
+            "under it."
+        ),
+        method="POST",
+        path="/projects/{project}/auto_ship",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "note": {"type": "string"},
+                "actor": {"type": "string"},
+            },
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_labels",
+        description=(
+            "The labels added to every issue this project's work units become -- on top of the per-unit "
+            "ones naming the anchor, the kind and each slice. Project-wide operating config, typically "
+            "naming the team a consumer admits work for, and the reason a consumer can have one "
+            "admission rule covering both generated issues and ones a person filed by hand. Also "
+            "`pickup`: the labels a consumer adds when it picks an issue up. An issue carrying one is "
+            "never edited or closed by a Ship, and with none configured nothing is edited."
+        ),
+        method="GET",
+        path="/projects/{project}/labels",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="get_repo",
+        description=(
+            "The repository this project's work units become tickets in, as `owner/name`. `null` means "
+            "none is configured, which is a normal answer and not a fault -- but nothing can be emitted "
+            "until one is. Check this before assuming an emission failed for some more interesting "
+            "reason. Setting it is a deployment decision and is not offered here."
+        ),
+        method="GET",
+        path="/projects/{project}/repo",
+        input_schema={
+            "type": "object",
+            "properties": {"project": {"type": "string"}},
+            "required": ["project"],
+        },
+    ),
+    ToolSchema(
+        name="list_docs",
+        description="Index of this unit's own documentation: name, title, summary, size.",
+        method="GET",
+        path="/docs",
+        input_schema={"type": "object", "properties": {}, "required": []},
+    ),
+    ToolSchema(
+        name="get_doc",
+        description="One of this unit's documents, as Markdown. Names come from list_docs.",
+        method="GET",
+        path="/docs/{name}",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    ),
+)
+
+BY_NAME: Mapping[str, ToolSchema] = {s.name: s for s in DECLS}
