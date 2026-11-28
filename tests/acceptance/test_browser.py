@@ -81,12 +81,8 @@ def normaliser(page):
 
 
 def test_browser_check_passes(request, tmp_path, monkeypatch):
-    # S-508's session fixture, looked up in the test; its helpers are taken from the conftest module
-    # pytest loaded, the one that defines the fixture's own AcceptanceInputs.
-    inputs = request.getfixturevalue("acceptance_inputs")
-    conftest = sys.modules[type(inputs).__module__]
-    call, fill, read_tools = conftest.call, conftest.fill, conftest.read_tools
-
+    # The modules under test first, so while they are absent this test fails for that reason and not
+    # for an acceptance input the environment lacks.
     from dashcheck import browser
     from dashcheck.browser import (
         DECLARED_FALLBACKS,
@@ -110,6 +106,12 @@ def test_browser_check_passes(request, tmp_path, monkeypatch):
 
     from startcheck import runner
     from startcheck.runner import UnitCommand, restore, start, stop
+
+    # S-508's session fixture, looked up in the test; its helpers are taken from the conftest module
+    # pytest loaded, the one that defines the fixture's own AcceptanceInputs.
+    inputs = request.getfixturevalue("acceptance_inputs")
+    conftest = sys.modules[type(inputs).__module__]
+    call, fill, read_tools = conftest.call, conftest.fill, conftest.read_tools
 
     running = UnitCommand("running", inputs.running_install)
     rebuilt = UnitCommand("rebuilt", inputs.rebuilt_install)
