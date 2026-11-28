@@ -110,7 +110,9 @@ def main(base_dir, head_dir, redefined=()):
     head = results(head_dir)
     broke, redef, fixed = compare(passing(results(base_dir)), passing(head), redefined)
     mine = {t: r for t, r in head.items() if r and in_files(t, redefined)}
-    fixture = sorted(t for t, r in mine.items() if wrong_reason(r))
+    # tests/acceptance needs the old install and a store copy (S-484): CI has neither by design, forge's
+    # acceptance gate runs them locally, so their setup error here is no fixture fault
+    fixture = sorted(t for t, r in mine.items() if wrong_reason(r) and not t.startswith("tests.acceptance."))
     lines = ["## Test ratchet", "", "%d newly passing, %d broken, %d redefined by this test unit"
              % (len(fixed), len(broke), len(redef)), ""]
     lines += ["- REBOUND (a second top-level definition replaces the first): %s" % d for d in dup]
