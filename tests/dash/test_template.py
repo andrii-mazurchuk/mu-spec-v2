@@ -1,7 +1,7 @@
-"""The page template's shape (T-489).
+"""The page template's shape (T-509).
 
 The S-509 constants are read from dashboard/src/render.ts by running bun over
-it; S-13's TEMPLATE, ENTRY and MARKER are read by bun from the build module's
+it; S-13's TEMPLATE and MARKER are read by bun from the build module's
 own `export const` initialisers. The build module is not imported: importing
 it runs the build, which writes the page. The template is parsed by rules of
 this file's own, with html.parser only on text that holds no style element.
@@ -9,6 +9,7 @@ this file's own, with html.parser only on text that holds no style element.
 
 import json
 import re
+import shutil
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
@@ -17,6 +18,7 @@ REPO = Path(__file__).resolve().parents[2]
 PAGE = REPO / "dashboard"
 RENDER = "dashboard/src/render.ts"
 BUILD = "dashboard/build.ts"
+BUN = shutil.which("bun") or "bun"
 RULE = re.compile(r"([^{}]+?)\s*\{([^{}]*)\}")
 DECLARATION = re.compile(r"([A-Za-z-][A-Za-z0-9-]*)\s*:\s*([^;{}]+?)\s*(?=[;}])")
 SCHEME_OR_NETWORK = re.compile(r"^\s*([A-Za-z][A-Za-z0-9+.-]*:|//)")
@@ -34,7 +36,7 @@ def read_constants() -> dict:
         f"const r = await import({json.dumps(render.as_uri())});"
         f"const src = await Bun.file({json.dumps(str(REPO / BUILD))}).text();"
         "const s13 = {};"
-        "for (const name of ['TEMPLATE', 'ENTRY', 'MARKER']) {"
+        "for (const name of ['TEMPLATE', 'MARKER']) {"
         "  const m = src.match(new RegExp('^export const ' + name + '\\\\s*=\\\\s*([^\\\\n;]+);', 'm'));"
         "  s13[name] = m ? (0, eval)(m[1]) : null;"
         "}"
@@ -47,12 +49,12 @@ def read_constants() -> dict:
         " FALLBACKS: Object.fromEntries(r.PALETTE.map((t) => [t, r.fallbackName(t)]))}));"
     )
     done = subprocess.run(
-        ["bun", "-e", script], check=False, cwd=REPO, capture_output=True, text=True, encoding="utf-8",
+        [BUN, "-e", script], check=False, cwd=REPO, capture_output=True, text=True, encoding="utf-8",
         timeout=120,
     )
     assert done.returncode == 0, done.stderr
     consts = json.loads(done.stdout.strip().splitlines()[-1])
-    for name in ("TEMPLATE", "ENTRY", "MARKER"):
+    for name in ("TEMPLATE", "MARKER"):
         assert isinstance(consts[name], str), f"{BUILD} has no `export const {name} = <string>;`"
     return consts
 
@@ -186,27 +188,17 @@ def test_template_shape():
         assert sides["dark"] not in selector, f"a page rule sits under {selector!r}"
     assert "prefers-color-scheme" not in own.lower(), "the page's own rules hold prefers-color-scheme"
 
-    # 6. The body: the root element only, then the marker once.
+    # 6. The body is the root: it holds the marker once and nothing else, and carries no id.
     assert text.count(marker) == 1, f"MARKER {text.count(marker)} times"
     assert body_at <= text.index(marker) < body_end, "MARKER is not inside body"
+    assert body.strip() == marker, f"body holds more than MARKER: {body.strip()!r}"
     body_tags = parse(body.replace(marker, ""))
-    assert len(body_tags.starts) == 1, [t for t, _ in body_tags.starts]
-    root, attrs = body_tags.starts[0]
-    assert body_tags.ends == [root], (root, body_tags.ends)
+    assert body_tags.starts == [], [t for t, _ in body_tags.starts]
     assert body_tags.data == [], body_tags.data
-    root_end = re.compile(rf"</{re.escape(root)}\s*>", re.IGNORECASE).search(body)
-    assert root_end, f"no </{root}> in body"
-    assert body.index(marker) > root_end.start(), "MARKER is not after the root element's end tag"
+    body_tag = parse(re.search(r"<body\b[^>]*>", text, re.IGNORECASE).group(0))
+    assert "id" not in body_tag.starts[0][1], f"the body tag carries an id: {body_tag.starts[0][1]}"
 
-    # 7. The entry looks the root up by its id.
-    r = attrs.get("id")
-    assert r, f"the root <{root}> has no id"
-    entry = PAGE / consts["ENTRY"]
-    assert entry.is_file(), f"ENTRY {consts['ENTRY']} is absent from dashboard/"
-    entry_text = entry.read_text(encoding="utf-8")
-    assert re.search(r"([\"'`])" + re.escape(r) + r"\1", entry_text), f"{consts['ENTRY']} holds no literal {r!r}"
-
-    # 8. No attribute names a URL with a scheme or a leading //; no url( and no @import.
+    # 7. No attribute names a URL with a scheme or a leading //; no url( and no @import.
     outside = parse(element.sub("", text, count=1))
     for tag, a in outside.starts:
         for key, value in a.items():
@@ -214,6 +206,6 @@ def test_template_shape():
     assert "url(" not in text.lower(), "the template holds url("
     assert "@import" not in text.lower(), "the template holds @import"
 
-    # 9. No markup or address sink is named anywhere in the template.
+    # 8. No markup or address sink is named anywhere in the template.
     for sink in [*consts["MARKUP_SINKS"], *consts["ADDRESS_SINKS"]]:
         assert not names(text, sink), f"the template names {sink!r}"
