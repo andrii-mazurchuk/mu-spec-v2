@@ -1,4 +1,5 @@
-"""The start check's runner: restore the pristine copies, start one unit from its own install, class
+"""The start check's runner: restore the pristine copies, start one unit by running its own install's
+mu_spec.main as __main__, class
 its start, check it is alive, stop it and wait for its port to refuse.
 
 Acceptance and test only; never imported by mu_spec. Both units run under the check's own
@@ -41,8 +42,10 @@ STOP_ALLOWANCE_S = 15.0
 POLL_S = 0.1
 REACH_HOST = "127.0.0.1"
 START_OUTCOMES = ("listening", "exited", "hung")
+ENTRY_MODULE = "mu_spec.main"  # the unit's start module (python -m mu_spec.main); never the package's __main__
+ENTRY_FILE = ("mu_spec", "main.py")  # the start module's file, joined under an install root
 BOOTSTRAP = ("import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
-             "runpy.run_module('mu_spec', run_name='__main__', alter_sys=True)")
+             "runpy.run_module('mu_spec.main', run_name='__main__', alter_sys=True)")
 LAUNCH_FLAGS = ("-s",)  # every start: no user site folder; never -I or -E, which ignore the seed
 HASH_SEED_NAME = "PYTHONHASHSEED"  # the one PYTHON* variable that ever reaches a unit
 DEFAULT_HASH_SEED = 0  # the seed when the test chooses none (0 turns hash randomisation off)
@@ -61,7 +64,7 @@ class RunnerError(Exception):
 @dataclass(frozen=True)
 class UnitCommand:
     label: str  # 'running' or 'rebuilt'
-    install_root: str  # absolute folder holding that unit's mu_spec package
+    install_root: str  # absolute folder holding that unit's mu_spec package, ENTRY_FILE its start module
     hash_seed: int | None = None  # None means DEFAULT_HASH_SEED
 
 
